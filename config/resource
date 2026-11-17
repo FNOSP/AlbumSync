@@ -1,0 +1,18 @@
+{
+    "data-share":
+    {
+        "shares":
+        [
+            {
+                "name": "AlbumSync",
+                "permission":
+                {
+                    "rw":
+                    [
+                        "AlbumSync"
+                    ]
+                }
+            }
+        ]
+    }
+}

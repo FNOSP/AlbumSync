@@ -1,0 +1,56 @@
+﻿diff --git a/src/hwcloudpd/cas_auth.py b/src/hwcloudpd/cas_auth.py
+index d452eae..eb81cb7 100644
+--- a/src/hwcloudpd/cas_auth.py
++++ b/src/hwcloudpd/cas_auth.py
+@@ -741,6 +741,12 @@ class HuaweiCasAuthenticator:
+                 f"cloudIframeAuthIdentify 未返回解锁跳转地址或二次验证方式 (errorCode={page_info.get('errorCode')!r})"
+             )
+ 
++        raw_user = str(local_info.get("userAccount") or "").strip() or None
++        site_id = local_info.get("curAccountSiteID") or local_info.get("currentSiteID") or 1
++        req_client_type = str(local_info.get("reqClientType") or flat_params.get("reqClientType") or "1")
++        lang = str(local_info.get("lang") or flat_params.get("lang") or "zh-cn")
++        login_channel = str(local_info.get("loginChannel") or flat_params.get("loginChannel") or "1000002")
++
+         channel_summary = "; ".join(
+             self._format_channel_label(i + 1, ch) for i, ch in enumerate(channels)
+         )
+@@ -757,17 +763,31 @@ class HuaweiCasAuthenticator:
+                     "tips_scene_id": tips_scene_id,
+                 }
+             )
++            # Non-TTY callers cannot receive a prompt; trigger the verification
++            # code now so the follow-up `--two-fa-code` invocation has a code to
++            # submit (previously the send only happened on the interactive path).
++            selected_channel = self._select_2fa_channel_and_send(
++                ajax_base,
++                channels,
++                state,
++                user_account=raw_user,
++                site_id=site_id,
++                req_client_type=req_client_type,
++                lang=lang,
++                login_channel=login_channel,
++                sms_oper_type="22",
++                email_oper_type="22",
++                interactive=False,
++                prompt_fn=prompt_fn,
++                output_fn=output_fn,
++            )
++            sent_to = str((selected_channel or {}).get("name") or "").strip()
+             raise TwoFactorRequiredError(
+                 f"华为云空间图库解锁需要二次验证（{channel_summary}）。"
+-                "请在终端执行 `docker exec -it hwcloudpd hwcloudpd --auth-only` 输入验证码（完成后将记住受信任设备）。"
++                + (f"验证码已发送至 {sent_to}。" if sent_to else "验证码已发送。")
++                + "请在 10 分钟内执行 `hwcloudpd --auth-only --two-fa-code XXXXXX` 完成验证（完成后将记住受信任设备）。"
+             )
+ 
+-        raw_user = str(local_info.get("userAccount") or "").strip() or None
+-        site_id = local_info.get("curAccountSiteID") or local_info.get("currentSiteID") or 1
+-        req_client_type = str(local_info.get("reqClientType") or flat_params.get("reqClientType") or "1")
+-        lang = str(local_info.get("lang") or flat_params.get("lang") or "zh-cn")
+-        login_channel = str(local_info.get("loginChannel") or flat_params.get("loginChannel") or "1000002")
+-
+         selected = self._select_2fa_channel_and_send(
+             ajax_base,
+             channels,

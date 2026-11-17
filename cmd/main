@@ -1,0 +1,235 @@
+#!/bin/bash
+
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+
+APP_SRC_DIR="${TRIM_APPDEST}/server"
+
+# 引擎需要 Python >= 3.11（fnOS 通过 install_dep_apps 提供 python 3.11）
+# 纯标准库实现，无需 venv / pip
+find_python() {
+  for candidate in \
+    /usr/bin/python3.11 \
+    /usr/local/bin/python3.11 \
+    /usr/bin/python3.12 \
+    /usr/local/bin/python3.12 \
+    /usr/bin/python3.13 \
+    /usr/local/bin/python3.13 \
+    /usr/bin/python3 \
+    /usr/local/bin/python3; do
+    if [ -x "${candidate}" ]; then
+      if "${candidate}" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+        echo "${candidate}"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+PYTHON_BIN=$(find_python)
+if [ -z "${PYTHON_BIN}" ]; then
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Python3 >= 3.11 not found (install_dep_apps: python 3.11)" >>"${LOG_FILE}"
+  exit 1
+fi
+
+log_msg() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >>"${LOG_FILE}"
+}
+
+start_process() {
+  if status; then
+    log_msg "Process already running, skip start"
+    return 0
+  fi
+  log_msg "No existing process, proceeding with start"
+
+  log_msg "Starting ${TRIM_APPNAME:-AlbumSync} ${TRIM_APPVER:-0.1.0}"
+  log_msg "App directory: ${TRIM_APPDEST}"
+  log_msg "Data directory: ${TRIM_PKGVAR}"
+  log_msg "Config directory: ${TRIM_PKGETC:-N/A}"
+  log_msg "TRIM_SERVICE_PORT=${TRIM_SERVICE_PORT:-not set}"
+  log_msg "Python binary: ${PYTHON_BIN}"
+  log_msg "APP_SRC_DIR: ${APP_SRC_DIR}"
+
+  # 端口号仅从 manifest 的 service_port（通过 TRIM_SERVICE_PORT 环境变量）获取
+  LISTEN_PORT="${TRIM_SERVICE_PORT:-9801}"
+  log_msg "LISTEN_PORT (from manifest TRIM_SERVICE_PORT): ${LISTEN_PORT}"
+
+  local ui_dir="${TRIM_APPDEST}/ui"
+  if [ ! -d "${ui_dir}" ]; then
+    log_msg "ERROR: UI directory not found: ${ui_dir}"
+    return 1
+  fi
+
+  local serve_script="${APP_SRC_DIR}/server.py"
+  if [ ! -f "${serve_script}" ]; then
+    log_msg "ERROR: server.py not found: ${serve_script}"
+    return 1
+  fi
+
+  # --- 数据目录归属自愈：仅 root 身份执行（package 模式下系统创建的目录归属已正确，
+  #     且包用户无 chown 权限，跳过）。root 模式下 install/upgrade 可能以 root 建目录/保留
+  #     数据文件，导致降权进程 PermissionError，需修正给 TRIM_USERNAME；
+  #     app.pid 与 info.log 由 root 脚本自身维护，保持 root 属主不修正 ---
+  if [ "$(id -u)" = "0" ] && [ -n "${TRIM_USERNAME:-}" ]; then
+    local run_group
+    run_group="$(id -gn "${TRIM_USERNAME}" 2>/dev/null || echo "${TRIM_USERNAME}")"
+    mkdir -p "${TRIM_PKGVAR}/logs" "${TRIM_PKGVAR}/photos"
+    chown "${TRIM_USERNAME}:${run_group}" "${TRIM_PKGVAR}" \
+      "${TRIM_PKGVAR}/logs" "${TRIM_PKGVAR}/photos" 2>>"${LOG_FILE}"
+    chmod 775 "${TRIM_PKGVAR}/logs" "${TRIM_PKGVAR}/photos" 2>>"${LOG_FILE}"
+    # logs 下文件数量少，递归修正属主安全；photos 内文件本应由运行用户创建，不动
+    chown -R "${TRIM_USERNAME}:${run_group}" "${TRIM_PKGVAR}/logs" 2>>"${LOG_FILE}"
+    # PKGVAR 根下的运行时数据文件（auth.json/config.json/state.db*/cas_*/curl.txt/health.json）
+    # 在升级安装后可能属主为 root（fnOS 以 root 保留用户数据），导致降权进程 PermissionError
+    find "${TRIM_PKGVAR}" -maxdepth 1 -type f \
+      ! -name "$(basename "${PID_FILE}")" ! -name "$(basename "${LOG_FILE}")" \
+      -exec chown "${TRIM_USERNAME}:${run_group}" {} + 2>>"${LOG_FILE}"
+    log_msg "Data directory ownership fixed: ${TRIM_USERNAME}:${run_group}"
+  fi
+
+  local socket_path="${TRIM_APPDEST}/app.sock"
+  # 清理旧 socket 文件
+  rm -f "${socket_path}"
+
+  local gateway_prefix="/app/${TRIM_APPNAME:-AlbumSync}"
+  CMD="\"${PYTHON_BIN}\" \"${serve_script}\" \"${ui_dir}\" ${LISTEN_PORT} \"${socket_path}\" \"${gateway_prefix}\""
+
+  log_msg "CMD = ${CMD}"
+  log_msg "Socket path = ${socket_path}"
+
+  # --- 启动 Web 服务 ---
+  # root 模式（或本地 root 调试）：runuser 降权到包用户（遵循飞牛 OS 权限规范——
+  # 长期对外服务以非 root 运行）；package 模式：脚本本身已是包用户，直接运行并继承
+  # fnOS 注入的 TRIM_* 环境；本地开发（无 TRIM_USERNAME）：当前用户直跑
+  if [ "$(id -u)" = "0" ] && [ -n "${TRIM_USERNAME:-}" ]; then
+    runuser -u "${TRIM_USERNAME}" -- env \
+      TRIM_USERNAME="${TRIM_USERNAME}" \
+      TRIM_RUN_USERNAME="${TRIM_RUN_USERNAME:-${TRIM_USERNAME}}" \
+      TRIM_PKGVAR="${TRIM_PKGVAR}" \
+      TRIM_APPDEST="${TRIM_APPDEST}" \
+      TRIM_APPNAME="${TRIM_APPNAME}" \
+      TRIM_APPVER="${TRIM_APPVER:-}" \
+      TRIM_SERVICE_PORT="${TRIM_SERVICE_PORT:-}" \
+      TRIM_ROOT="${TRIM_ROOT:-}" \
+      bash -c "${CMD}" >>"${LOG_FILE}" 2>&1 &
+  else
+    # package 模式（脚本已是包用户）或本地开发兜底：直接以当前用户跑，继承环境
+    bash -c "${CMD}" >>"${LOG_FILE}" 2>&1 &
+  fi
+  local bg_pid=$!
+  printf "%s" "${bg_pid}" >"${PID_FILE}"
+  log_msg "Background process started, PID=${bg_pid}, PID_FILE=${PID_FILE}"
+
+  # 启动后验证进程是否存活
+  sleep 2
+  if check_process "${bg_pid}"; then
+    log_msg "SUCCESS: Process ${bg_pid} is still running after 2s"
+  else
+    log_msg "ERROR: Process ${bg_pid} exited immediately after startup"
+    log_msg "Check command output above for errors (e.g. python missing, port in use)"
+    rm -f "${PID_FILE}"
+    return 1
+  fi
+
+  # 检查端口是否监听
+  if command -v ss >/dev/null 2>&1; then
+    if ss -tln 2>/dev/null | grep -q ":${LISTEN_PORT} "; then
+      log_msg "SUCCESS: Port ${LISTEN_PORT} is listening"
+    else
+      log_msg "WARNING: Port ${LISTEN_PORT} is not listening yet (process running but port not bound)"
+    fi
+  fi
+
+  # 检查 Unix socket 是否创建
+  if [ -S "${socket_path}" ]; then
+    log_msg "SUCCESS: Unix socket created at ${socket_path}"
+  else
+    log_msg "WARNING: Unix socket not found at ${socket_path}"
+  fi
+
+  return 0
+}
+
+stop_process() {
+  log_msg "Stopping process ..."
+
+  if [ -r "${PID_FILE}" ]; then
+    pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+
+    log_msg "pid=${pid}"
+    if ! check_process "${pid}"; then
+      rm -f "${PID_FILE}"
+      log_msg "remove pid file 1"
+      return
+    fi
+
+    log_msg "send TERM signal to PID:${pid}..."
+    kill -TERM ${pid} >>"${LOG_FILE}" 2>&1
+
+    local count=0
+    while check_process "${pid}" && [ $count -lt 300 ]; do
+      sleep 1
+      count=$((count + 1))
+      log_msg "waiting process terminal... (${count}s/300s)"
+    done
+
+    if check_process "${pid}"; then
+      log_msg "send KILL signal to PID:${pid}..."
+      kill -KILL "${pid}"
+      sleep 1
+      rm -f "${PID_FILE}"
+    else
+      log_msg "process killed... "
+      rm -f "${PID_FILE}"
+    fi
+  fi
+
+  # 清理 Unix socket 文件
+  rm -f "${TRIM_APPDEST}/app.sock"
+  log_msg "socket file cleaned"
+
+  return 0
+}
+
+check_process() {
+  local pid=$1
+  if kill -0 "${pid}" 2>/dev/null; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+status() {
+  if [ -f "${PID_FILE}" ]; then
+    pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+    if check_process "${pid}"; then
+      return 0
+    else
+      rm -f "${PID_FILE}"
+    fi
+  fi
+
+  return 1
+}
+
+case $1 in
+  start)
+    start_process
+    ;;
+  stop)
+    stop_process
+    ;;
+  status)
+    if status; then
+      exit 0
+    else
+      exit 3
+    fi
+    ;;
+  *)
+    exit 1
+    ;;
+esac

@@ -1,0 +1,38 @@
+#!/bin/bash
+
+LOG_FILE="${TRIM_TEMP_LOGFILE:-${TRIM_PKGVAR}/info.log}"
+
+log_msg() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >>"${LOG_FILE}"
+}
+
+log_msg "Starting upgrade for ${TRIM_APPNAME:-AlbumSync} ${TRIM_APPVER:-0.1.0}"
+log_msg "App directory: ${TRIM_APPDEST}"
+log_msg "Data directory: ${TRIM_PKGVAR}"
+
+# 升级不触碰 TRIM_PKGVAR 中的用户数据（config.json、auth.json、
+# cas_cookies.lwp、state.db、logs/、photos/），仅确保目录结构完整。
+# 应用为纯 Python 标准库实现，无第三方依赖，不需要 venv / pip。
+mkdir -p "${TRIM_PKGVAR}"
+mkdir -p "${TRIM_PKGVAR}/logs"
+mkdir -p "${TRIM_PKGVAR}/photos"
+
+# 目录归属修正：仅 root 身份执行——root 模式下安装曾以 root 建目录、升级可能以
+# root 保留数据文件（auth.json 等，0.1.4 实测复发）；package 模式下脚本本身是包用户
+# （系统创建目录归属已正确，无 chown 权限），跳过。
+if [ "$(id -u)" = "0" ] && [ -n "${TRIM_USERNAME:-}" ]; then
+  RUN_GROUP="$(id -gn "${TRIM_USERNAME}" 2>/dev/null || echo "${TRIM_USERNAME}")"
+  chown "${TRIM_USERNAME}:${RUN_GROUP}" "${TRIM_PKGVAR}" \
+    "${TRIM_PKGVAR}/logs" "${TRIM_PKGVAR}/photos" 2>>"${LOG_FILE}"
+  chmod 775 "${TRIM_PKGVAR}/logs" "${TRIM_PKGVAR}/photos" 2>>"${LOG_FILE}"
+  chown -R "${TRIM_USERNAME}:${RUN_GROUP}" "${TRIM_PKGVAR}/logs" 2>>"${LOG_FILE}"
+  # PKGVAR 根下散文件（auth.json/config.json/state.db*/cas_* 等）同步修正属主；
+  # app.pid/info.log 由 root 脚本维护，保持 root 属主
+  find "${TRIM_PKGVAR}" -maxdepth 1 -type f \
+    ! -name "app.pid" ! -name "info.log" \
+    -exec chown "${TRIM_USERNAME}:${RUN_GROUP}" {} + 2>>"${LOG_FILE}"
+  log_msg "Data directory ownership set to ${TRIM_USERNAME}:${RUN_GROUP}"
+fi
+
+log_msg "Upgrade completed successfully."
+exit 0

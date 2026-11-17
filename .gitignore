@@ -1,0 +1,27 @@
+# vendored engine（由 tools/sync_engine.py 生成，勿手工编辑）
+app/server/hwcloudpd/
+
+# 打包产物
+*.fpk
+
+# 运行时凭据与本地配置（绝不入库，任意层级）
+**/config.json
+**/auth.json
+**/curl.txt
+**/cas_pending_2fa.json
+**/cas_cookies.lwp
+**/cas_state.json
+**/health.json
+**/state.db
+**/state.db-wal
+**/state.db-shm
+
+# 本地开发数据目录（server.py dev 模式）
+dev-data/
+
+# 打包工具二进制（4MB，从 FreePower 复制获取）
+tools/fnpack.exe
+
+# Python 运行产物
+__pycache__/
+*.pyc

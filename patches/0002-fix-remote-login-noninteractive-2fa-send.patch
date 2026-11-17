@@ -1,0 +1,34 @@
+diff --git a/hwcloudpd/cas_auth.py b/hwcloudpd/cas_auth.py
+--- a/hwcloudpd/cas_auth.py
++++ b/hwcloudpd/cas_auth.py
+@@ -1146,9 +1146,29 @@ class HuaweiCasAuthenticator:
+                     "site_id": site_id,
+                 }
+             )
++            # Non-TTY callers cannot receive a prompt; trigger the verification
++            # code now so the follow-up `--two-fa-code` invocation has a code to
++            # submit (previously the send only happened on the interactive path).
++            selected_channel = self._select_2fa_channel_and_send(
++                ajax_base,
++                channels,
++                state,
++                user_account=(self.username or "").strip() or None,
++                site_id=site_id,
++                req_client_type=str(login_form["reqClientType"]),
++                lang=str(login_form["lang"]),
++                login_channel=str(login_form["loginChannel"]),
++                sms_oper_type="8",
++                email_oper_type="9",
++                interactive=False,
++                prompt_fn=prompt_fn,
++                output_fn=output_fn,
++            )
++            sent_to = str((selected_channel or {}).get("name") or "").strip()
+             raise TwoFactorRequiredError(
+                 f"触发华为账号二次验证（{channel_summary}）。"
+-                "请在终端执行 `docker exec -it hwcloudpd hwcloudpd --auth-only` 输入验证码（完成后将自动记住受信任设备）。"
++                + (f"验证码已发送至 {sent_to}。" if sent_to else "验证码已发送。")
++                + "请在 10 分钟内执行 `hwcloudpd --auth-only --two-fa-code XXXXXX` 完成验证（完成后将自动记住受信任设备）。"
+             )
+ 
+         raw_user = (self.username or "").strip() or None
