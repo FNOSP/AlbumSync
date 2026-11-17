@@ -1,0 +1,33 @@
+#!/bin/bash
+
+LOG_FILE="${TRIM_TEMP_LOGFILE:-${TRIM_PKGVAR}/info.log}"
+
+log_msg() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >>"${LOG_FILE}"
+}
+
+log_msg "Starting install for ${TRIM_APPNAME:-AlbumSync} ${TRIM_APPVER:-0.1.0}"
+log_msg "App directory: ${TRIM_APPDEST}"
+log_msg "Data directory: ${TRIM_PKGVAR}"
+
+# 应用为纯 Python 标准库实现，无第三方依赖，不需要 venv / pip 安装。
+# 创建数据目录结构：
+#   logs/    运行日志（info.log / sync.log）
+#   photos/  默认照片存储目录（可在 Web 界面改为共享目录的绝对路径）
+mkdir -p "${TRIM_PKGVAR}"
+mkdir -p "${TRIM_PKGVAR}/logs"
+mkdir -p "${TRIM_PKGVAR}/photos"
+
+# 目录归属修正：仅 root 身份执行——root 模式下 install 以 root 建目录，降权进程
+# 需要写权限；package 模式下脚本本身就是包用户（系统创建目录归属已正确，且无
+# chown 权限），mkdir 的目录天然属主正确，跳过。
+if [ "$(id -u)" = "0" ] && [ -n "${TRIM_USERNAME:-}" ]; then
+  RUN_GROUP="$(id -gn "${TRIM_USERNAME}" 2>/dev/null || echo "${TRIM_USERNAME}")"
+  chown "${TRIM_USERNAME}:${RUN_GROUP}" "${TRIM_PKGVAR}" \
+    "${TRIM_PKGVAR}/logs" "${TRIM_PKGVAR}/photos" 2>>"${LOG_FILE}"
+  chmod 775 "${TRIM_PKGVAR}/logs" "${TRIM_PKGVAR}/photos" 2>>"${LOG_FILE}"
+  log_msg "Data directory ownership set to ${TRIM_USERNAME}:${RUN_GROUP}"
+fi
+
+log_msg "Install completed successfully."
+exit 0

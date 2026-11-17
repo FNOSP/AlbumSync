@@ -1,0 +1,14 @@
+{
+    ".url": {
+        "AlbumSync.Application": {
+            "title": "相册同步",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "",
+            "gatewayPrefix": "/app/AlbumSync",
+            "gatewaySocket": "app.sock",
+            "url": "/app/AlbumSync",
+            "allUsers": false
+        }
+    }
+}

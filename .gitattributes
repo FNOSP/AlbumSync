@@ -1,0 +1,7 @@
+# 仓库与检出一律 LF：cmd/*、config/*、manifest 为 fnOS(Linux) 侧文件，
+# CRLF 会导致 fnOS 上 shell 执行失败与 build_fpk.py 的行尾校验失败
+* text=auto eol=lf
+
+# 二进制文件
+*.png binary
+*.fpk binary

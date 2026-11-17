@@ -1,0 +1,30 @@
+#!/bin/bash
+
+LOG_FILE="${TRIM_TEMP_LOGFILE:-${TRIM_PKGVAR}/info.log}"
+
+log_msg() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >>"${LOG_FILE}"
+}
+
+### This script is called after the user uninstalls the application.
+### 默认保留用户数据（凭据 auth.json、数据库 state.db、日志），
+### 用户在卸载向导中选择「删除数据」时才清理 TRIM_PKGVAR。
+### 注意：照片文件（PKGVAR/photos 及用户自定义的共享目录目标路径）
+### 属于用户数据，无论哪种模式都不做删除——共享目录里的照片由用户自行管理。
+
+log_msg "Uninstall callback triggered for ${TRIM_APPNAME:-AlbumSync}"
+
+if [ "${wizard_data_action:-}" != "delete" ]; then
+  log_msg "Data keep mode selected, skipping cleanup (credentials & logs preserved)."
+  exit 0
+fi
+
+log_msg "Full cleanup mode: removing application data directory..."
+
+if [ -n "${TRIM_PKGVAR}" ] && [ -d "${TRIM_PKGVAR}" ]; then
+  log_msg "Removing data directory: ${TRIM_PKGVAR} (including default photos dir inside PKGVAR)"
+  rm -rf "${TRIM_PKGVAR}"
+fi
+
+log_msg "Full cleanup completed. Photos on user shared folders are NOT touched."
+exit 0

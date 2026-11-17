@@ -1,0 +1,1230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>相册同步 - 华为云空间相册备份</title>
+<style>
+:root{
+  --bg:#f5f6fa; --card:#ffffff; --border:#e4e7ee; --text:#24292f; --muted:#6a7383;
+  --accent:#1667d9; --accent-hover:#0f57bd; --green:#1a9b57; --red:#d3455b;
+  --orange:#d97706; --radius:10px; --shadow:0 1px 3px rgba(16,24,40,.08);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+  background:var(--bg);color:var(--text);font-size:14px;line-height:1.55}
+a{color:var(--accent);text-decoration:none}
+.wrap{max-width:980px;margin:0 auto;padding:16px 16px 48px}
+header{display:flex;align-items:center;gap:12px;padding:10px 4px 14px}
+header img{width:34px;height:34px;border-radius:8px}
+header h1{font-size:18px;font-weight:600}
+header .ver{color:var(--muted);font-size:12px}
+nav{display:flex;gap:4px;background:var(--card);border:1px solid var(--border);
+  border-radius:var(--radius);padding:4px;box-shadow:var(--shadow);margin-bottom:16px;overflow-x:auto}
+nav button{flex:1;border:0;background:transparent;padding:9px 14px;border-radius:7px;cursor:pointer;
+  font-size:14px;color:var(--muted);white-space:nowrap}
+nav button.active{background:var(--accent);color:#fff;font-weight:500}
+nav button:hover:not(.active){background:#eef1f6;color:var(--text)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+  padding:18px;box-shadow:var(--shadow);margin-bottom:16px}
+.card h2{font-size:15px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.card h2 .hint{font-size:12px;color:var(--muted);font-weight:400}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:20px;
+  font-size:12px;font-weight:500;border:1px solid transparent}
+.badge::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.badge.ok{background:#e7f6ee;color:var(--green);border-color:#bfe8d1}
+.badge.err{background:#fdecef;color:var(--red);border-color:#f5c6d0}
+.badge.warn{background:#fef3e2;color:var(--orange);border-color:#f5dcb3}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+.stat{background:#f8f9fc;border:1px solid var(--border);border-radius:8px;padding:10px 12px;text-align:center}
+.stat .num{font-size:22px;font-weight:600}
+.stat .lbl{font-size:12px;color:var(--muted);margin-top:2px}
+.stat.green .num{color:var(--green)}.stat.red .num{color:var(--red)}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:6px 12px;font-size:13px}
+.kv .k{color:var(--muted)}
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);background:var(--card);
+  color:var(--text);padding:7px 16px;border-radius:8px;cursor:pointer;font-size:13px}
+.btn:hover{background:#f3f5f9}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:var(--accent-hover)}
+.btn.danger{color:var(--red);border-color:#f0c4cc}
+.btn:disabled{opacity:.55;cursor:not-allowed}
+.btn-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px 18px}
+.field{display:flex;flex-direction:column;gap:5px}
+.field.full{grid-column:1/-1}
+.field label{font-size:13px;font-weight:500}
+.field .tip{font-size:11.5px;color:var(--muted)}
+input[type=text],input[type=password],input[type=number],input[type=date],input[type=url],select,textarea{
+  border:1px solid var(--border);border-radius:7px;padding:7px 10px;font-size:13px;background:#fff;color:var(--text);
+  font-family:inherit;width:100%}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
+textarea{resize:vertical;min-height:90px;font-family:ui-monospace,Consolas,monospace}
+.switch-row{display:flex;align-items:flex-start;gap:10px;padding:6px 0}
+.switch-row input[type=checkbox]{margin-top:3px;width:15px;height:15px;accent-color:var(--accent)}
+.switch-row .lbl{font-weight:500}
+.switch-row .desc{font-size:12px;color:var(--muted)}
+.section-title{font-size:13px;font-weight:600;color:var(--accent);margin:18px 0 10px;
+  padding-bottom:5px;border-bottom:1px dashed var(--border)}
+fieldset{border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:12px}
+legend{font-size:12.5px;color:var(--muted);padding:0 6px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border)}
+th{color:var(--muted);font-weight:500;font-size:12.5px}
+pre.logs{background:#141822;color:#d6e2f0;border-radius:8px;padding:12px;font-size:12px;line-height:1.6;
+  overflow:auto;max-height:520px;white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,Consolas,monospace}
+.album-item{display:flex;align-items:center;gap:10px;padding:9px 6px;border-bottom:1px solid var(--border)}
+.album-item .name{flex:1;font-weight:500}
+.album-item .meta{color:var(--muted);font-size:12px}
+.album-item input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent)}
+.album-all-row{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;background:#f0f6ff;
+  border:1px solid #cfe0f6;border-radius:8px;margin-bottom:10px}
+.album-all-row input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);margin-top:3px;flex:none}
+.album-all-row .lbl{font-weight:500}
+.album-all-row .desc{font-size:12px;color:var(--muted)}
+.cron-row{display:flex;gap:8px}
+.cron-row input{flex:1}
+.cron-builder{border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-top:10px;background:#fafbfd}
+.cron-builder .cb-title{font-weight:600;font-size:13px;color:var(--text);margin-bottom:8px}
+.cron-builder .cb-cur{font-weight:400;color:var(--muted);font-family:ui-monospace,Consolas,monospace}
+.cron-top{display:flex;flex-direction:column;gap:6px}
+.cron-top .cron-lbl{color:var(--muted);font-size:13px}
+.cron-top select{padding:7px 9px;border:1px solid var(--border);border-radius:7px;font-size:13px;background:#fff;color:var(--text)}
+.cron-top input[type=text]{padding:7px 9px;border:1px solid var(--border);border-radius:7px;font-size:13px;font-family:ui-monospace,Consolas,monospace}
+.cb-tabs{display:flex;gap:2px;margin:4px 0 8px;border-bottom:1px solid var(--border)}
+.cb-tab{flex:1;padding:6px 0;border:none;background:none;border-bottom:2px solid transparent;font-size:13px;cursor:pointer;color:var(--muted)}
+.cb-tab.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+.cb-panel{min-height:60px}
+.pd-list{max-height:45vh;overflow-y:auto;margin-top:8px}
+.pd-row{display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:8px 10px;border:1px solid var(--border);border-radius:7px;margin-bottom:6px;cursor:pointer}
+.pd-row:hover{background:#f3f5f9}
+.pd-row.pd-disabled{cursor:not-allowed;opacity:.55}
+.pd-row.pd-disabled:hover{background:none}
+.pd-path{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;word-break:break-all}
+.pd-badge{flex:none;font-size:11.5px;padding:1px 8px;border-radius:9px;border:1px solid}
+.pd-badge.ok{color:#0a7d43;border-color:#0a7d43;background:#e8f7ee}
+.pd-badge.ro{color:#9a6b00;border-color:#d8a200;background:#fdf3d7}
+.pd-badge.no{color:#8a8f99;border-color:#c3c8d0;background:#f1f3f6}
+.pd-add{margin-left:8px;font-size:11.5px;white-space:nowrap}
+.cb-modes{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;flex:1}
+.cb-modes label{display:flex;align-items:center;gap:5px;cursor:pointer;color:var(--text)}
+.cb-modes input[type=radio]{accent-color:var(--accent);flex:none}
+.cb-inline{display:inline-flex;align-items:center;gap:4px;color:var(--muted)}
+.cb-inline input[type=number]{width:52px;padding:3px 5px;border:1px solid var(--border);border-radius:5px;text-align:center;font-size:13px}
+.cb-inline input[type=number]:disabled{background:#f0f1f4;color:#aab}
+.cb-grid{display:grid;grid-template-columns:repeat(10,1fr);gap:2px;margin-top:5px;max-height:96px;overflow-y:auto;padding:4px;background:#fff;border:1px solid var(--border);border-radius:6px}
+.cb-grid label{display:flex;align-items:center;justify-content:center;gap:3px;font-size:12px;color:var(--text);cursor:pointer;padding:2px 0;border-radius:4px}
+.cb-grid label:hover{background:#f0f4ff}
+.cb-grid input[type=checkbox]{accent-color:var(--accent);width:13px;height:13px;flex:none;margin:0}
+.cron-preview{margin-top:10px;padding:9px 12px;background:#f4f6fa;border-radius:8px;font-size:13px}
+.cron-preview .cp-title{color:var(--muted);margin-bottom:5px}
+.cron-preview ul{margin:0;padding-left:4px;list-style:none}
+.cron-preview li{font-family:ui-monospace,Consolas,monospace;color:var(--text);padding:1px 0}
+.cron-preview li.warn{color:#b45309;font-family:inherit}
+.chip{display:inline-block;background:#eef3fb;color:var(--accent);border-radius:5px;padding:1px 8px;font-size:11.5px;margin-left:6px}
+.empty{color:var(--muted);text-align:center;padding:22px 0}
+.banner{border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px}
+.banner.err{background:#fdecef;color:#a32636;border:1px solid #f0c4cc}
+.banner.warn{background:#fef3e2;color:#8a5a04;border:1px solid #f5dcb3}
+#toast-box{position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:999;
+  display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
+.toast{background:#2b3242;color:#fff;padding:10px 20px;border-radius:8px;font-size:13.5px;
+  box-shadow:0 4px 14px rgba(0,0,0,.25);animation:fadein .2s;max-width:80vw}
+.toast.ok{background:#1a7f4b}.toast.err{background:#b63146}
+@keyframes fadein{from{opacity:0;transform:translateY(-8px)}to{opacity:1}}
+#overlay{position:fixed;inset:0;background:rgba(20,24,34,.45);z-index:900;display:none;
+  align-items:center;justify-content:center}
+#overlay.show{display:flex}
+.modal{background:#fff;border-radius:12px;padding:22px;max-width:520px;width:92vw;box-shadow:0 10px 40px rgba(0,0,0,.3);max-height:calc(100vh - 56px);overflow-y:auto}
+.modal h3{font-size:16px;margin-bottom:12px}
+.modal .actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:640px){.two-col{grid-template-columns:1fr}.kv{grid-template-columns:110px 1fr}}
+.chan-row{display:flex;align-items:center;gap:8px;padding:7px 0}
+.code-input{font-size:22px;letter-spacing:10px;text-align:center;width:190px!important}
+.uptime{color:var(--muted);font-size:12px}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid #cbd3e0;border-top-color:var(--accent);
+  border-radius:50%;animation:rot .8s linear infinite;vertical-align:-2px}
+@keyframes rot{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <img src="./images/icon_64.png" alt="logo" onerror="this.style.display='none'">
+    <div>
+      <h1>相册同步</h1>
+      <span class="ver">华为云空间相册备份 · v<span id="ver">-</span> · <span class="uptime" id="uptime"></span></span>
+    </div>
+    <div style="margin-left:auto"><span id="auth-badge" class="badge err">加载中</span></div>
+  </header>
+
+  <nav id="tabs">
+    <button data-tab="status" class="active">状态总览</button>
+    <button data-tab="settings">同步设置</button>
+    <button data-tab="albums">相册选择</button>
+    <button data-tab="auth">认证与安全</button>
+    <button data-tab="logs">日志</button>
+  </nav>
+
+  <!-- 状态总览 -->
+  <div id="tab-status">
+    <div id="status-banner"></div>
+    <div class="card">
+      <h2>登录状态 <span class="hint" id="auth-detail"></span></h2>
+      <div id="auth-summary" class="empty">加载中…</div>
+    </div>
+    <div class="card">
+      <h2>最近一次同步报告 <span class="hint" id="sync-time-hint"></span></h2>
+      <div id="report-grid" class="stat-grid"><div class="empty" style="grid-column:1/-1">暂无同步记录</div></div>
+    </div>
+    <div class="card">
+      <h2>操作</h2>
+      <div class="btn-row">
+        <button class="btn primary" id="btn-sync" onclick="triggerSync()">立即同步</button>
+        <button class="btn" id="btn-dry" onclick="startDryRun()">dry-run 预览</button>
+        <button class="btn" onclick="refreshStatus()">刷新状态</button>
+        <span id="dry-status" class="hint"></span>
+      </div>
+      <div class="tip" style="margin-top:10px;color:var(--muted);font-size:12px">
+        手动同步与定时同步都要求登录态有效；若提示登录态失效，请前往「认证与安全」完成登录。
+      </div>
+    </div>
+    <div class="card">
+      <h2>数据库统计</h2>
+      <div id="store-grid" class="stat-grid"><div class="empty" style="grid-column:1/-1">-</div></div>
+    </div>
+  </div>
+
+  <!-- 同步设置 -->
+  <div id="tab-settings" style="display:none">
+    <div class="card">
+      <h2>账号与认证 <span class="hint">密码仅保存在 NAS 本地 config.json（chmod 600），提交后不再回显</span></h2>
+      <div class="form-grid">
+        <div class="field"><label>华为账号</label><input type="text" id="f-username" placeholder="手机号 / 邮箱">
+          <span class="tip">也可不填账号，改用「认证与安全」页的 cURL 导入（免密码）</span></div>
+        <div class="field"><label>密码</label><input type="password" id="f-password" placeholder="留空保持不变">
+          <span class="tip"><label style="font-weight:400"><input type="checkbox" id="f-password-clear" style="vertical-align:-2px"> 清除已保存的密码</label></span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>存储与目录</h2>
+      <div class="form-grid">
+        <div class="field full"><label>照片存储目录（绝对路径）</label><div class="cron-row"><input type="text" id="f-photos_dir" placeholder="/vol1/1000/photos" oninput="probePhotosDir(this.value)"><button class="btn" type="button" onclick="openPhotosDirPicker()">可选目录…</button></div>
+          <span class="tip" id="pd-probe"></span>
+          <span class="tip">需为 NAS 上已存在的目录绝对路径（fnOS 不会自动创建共享目录）。推荐先在 fnOS 文件管理器创建共享目录并确认应用有写权限，再填其路径（如 /vol1/1000/photo）；留空则用应用数据目录下 photos/</span></div>
+        <div class="field"><label>目录结构模板</label><input type="text" id="f-folder_structure" placeholder="{:%Y/%m/%d}">
+          <span class="tip">Python strftime 格式，例如 {:%Y/%m/%d} 或 {album}</span></div>
+        <div class="field"><label>时区</label><input type="text" id="f-timezone" placeholder="Asia/Shanghai"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>同步范围与过滤</h2>
+      <div class="form-grid">
+        <div class="field"><label>照片尺寸</label><select id="f-photo_size">
+          <option value="original">原图</option><option value="medium">中等</option><option value="thumb">缩略图</option></select></div>
+        <div class="field"><label>文件名匹配策略</label><select id="f-file_match_policy">
+          <option value="name-size-dedup-with-suffix">名称+大小+去重后缀（推荐）</option>
+          <option value="name-id7">名称+ID 后 7 位</option></select></div>
+        <div class="field"><label>实况照视频命名</label><select id="f-live_photo_mov_filename_policy">
+          <option value="none">不保存</option><option value="suffix">_video 后缀</option><option value="original">原始文件名</option></select></div>
+        <div class="field"><label>仅开始日期（YYYY-MM-DD）</label><input type="date" id="f-created_after"></div>
+        <div class="field"><label>仅结束日期（YYYY-MM-DD）</label><input type="date" id="f-created_before"></div>
+        <div class="field"><label>最小文件大小（MB）</label><input type="number" id="f-min_size" min="0" step="0.1" placeholder="不限"></div>
+        <div class="field"><label>最大文件大小（MB）</label><input type="number" id="f-max_size" min="0" step="0.1" placeholder="不限"></div>
+        <div class="field"><label>仅最近 N 天</label><input type="number" id="f-recent" min="1" placeholder="不限"></div>
+        <div class="field"><label>找到即停（N 个新文件）</label><input type="number" id="f-until_found" min="1" placeholder="不限"></div>
+      </div>
+      <div class="section-title">类型过滤</div>
+      <div id="skip-switches" class="two-col"></div>
+      <div class="section-title">删除策略（谨慎开启）</div>
+      <div id="delete-switches" class="two-col"></div>
+    </div>
+    <div class="card">
+      <h2>下载与性能</h2>
+      <div class="form-grid">
+        <div class="field"><label>下载并发数（1-8）</label><input type="number" id="f-download_concurrency" min="1" max="8"></div>
+        <div class="field"><label>分页大小（10-500）</label><input type="number" id="f-page_size" min="10" max="500"></div>
+        <div class="field"><label>请求间隔（毫秒）</label><input type="number" id="f-request_delay_ms" min="0" max="10000"></div>
+        <div class="field"><label>EXIF 拍摄时间注入</label><select id="f-set_exif_datetime">
+          <option value="false">关闭</option><option value="true">开启</option></select></div>
+        <div class="field"><label>XMP sidecar 元数据</label><select id="f-xmp_sidecar">
+          <option value="false">关闭</option><option value="true">开启</option></select></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>定时计划</h2>
+      <div class="form-grid">
+        <div class="field"><label>cron 表达式</label>
+          <div class="cron-row">
+            <input type="text" id="f-cron" placeholder="0 3 * * *">
+            <button class="btn" type="button" onclick="openCronPicker()">选择…</button>
+          </div>
+          <span class="tip">支持标准 5 段 crontab 与 @daily/@hourly 宏；留空则不按 cron 调度</span></div>
+        <div class="field"><label>轮询间隔（秒，可选）</label><input type="number" id="f-watch_interval" min="60" placeholder="不使用">
+          <span class="tip">与 cron 二选一；均未设置时兜底每 2 小时</span></div>
+        <div class="field"><label>保活间隔（秒，15-3600）</label><input type="number" id="f-keepalive_interval" min="15" max="3600"></div>
+        <div class="field"><label>启动时立即同步</label><select id="f-run_on_startup">
+          <option value="true">开启</option><option value="false">关闭</option></select></div>
+        <div class="field"><label>全量扫描间隔（小时）</label><input type="number" id="f-full_scan_interval_hours" min="0.1" step="0.5"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>通知</h2>
+      <div class="form-grid">
+        <div class="field full"><label>Webhook URL</label><input type="url" id="f-webhook_url" placeholder="https://... （每次同步结束后 POST JSON 摘要）"></div>
+        <div class="field"><label>Telegram chat_id</label><input type="text" id="f-telegram_chat_id" placeholder="可选"></div>
+        <div class="field"><label>通知脚本路径</label><input type="text" id="f-notification_script" placeholder="可选，同步结束后以摘要为 stdin 执行"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>其他</h2>
+      <div class="form-grid">
+        <div class="field"><label>日志级别</label><select id="f-log_level">
+          <option>DEBUG</option><option selected>INFO</option><option>WARNING</option><option>ERROR</option></select></div>
+      </div>
+      <div class="btn-row" style="margin-top:14px">
+        <button class="btn primary" id="btn-save-config" onclick="saveConfig()">保存配置（热生效）</button>
+        <button class="btn" onclick="loadConfig(true)">放弃修改</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 相册选择 -->
+  <div id="tab-albums" style="display:none">
+    <div class="card">
+      <h2>相册选择 <span class="hint" id="album-hint">勾选要同步的相册</span></h2>
+      <div class="album-all-row">
+        <input type="checkbox" id="album-all-toggle" onchange="onAllAlbumsToggle(this.checked)">
+        <div><div class="lbl">同步全部相册（含未来新增）</div>
+          <div class="desc">云端新增的相册会自动纳入同步，无需手动维护；勾选下方相册可将其排除</div></div>
+      </div>
+      <div class="btn-row" style="margin-bottom:10px">
+        <button class="btn" onclick="selectAlbums(true)">全选</button>
+        <button class="btn" onclick="selectAlbums(false)">清空勾选</button>
+        <button class="btn primary" id="btn-save-albums" onclick="saveAlbums()">保存相册选择</button>
+        <button class="btn" onclick="loadAlbums()">刷新列表</button>
+      </div>
+      <div id="album-error"></div>
+      <div class="tip" style="display:block;margin-bottom:8px;line-height:1.6">注：华为云端不返回空相册，「相机 / 截屏录屏」等空系统相册为占位显示；计数为 0 表示该相册云端当前无文件，回收站中的文件不计入相册计数</div>
+      <div id="album-list"><div class="empty">加载中…</div></div>
+    </div>
+  </div>
+
+  <!-- 认证与安全 -->
+  <div id="tab-auth" style="display:none">
+    <div class="card">
+      <h2>当前登录状态</h2>
+      <div id="auth-panel" class="empty">加载中…</div>
+      <div class="btn-row" style="margin-top:12px">
+        <button class="btn" onclick="refreshAuth()">刷新</button>
+        <button class="btn primary" id="btn-login" onclick="webLogin()">使用已保存账号登录</button>
+      </div>
+      <div id="login-output" style="margin-top:12px"></div>
+      <div id="twofa-panel" style="display:none">
+        <div class="section-title">二次验证</div>
+        <div id="twofa-channels"></div>
+        <div class="btn-row" style="margin-top:8px">
+          <input type="text" class="code-input" id="twofa-code" maxlength="6" placeholder="______" inputmode="numeric">
+          <button class="btn primary" id="btn-2fa" onclick="submit2fa()">提交验证码</button>
+        </div>
+        <div class="tip" style="margin-top:6px;color:var(--muted);font-size:12px">验证码 10 分钟内有效；验证通过后设备将被信任，后续会话过期可静默自动重登。</div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>浏览器会话导入（免密码） <span class="hint">从已登录华为云空间的浏览器复制登录请求 cURL</span></h2>
+      <div class="field">
+        <span class="tip">Chrome/Edge 开发者工具 → Network → 任意 cloud.dual.huawei.com 请求 → 右键「Copy as cURL」→ 粘贴到下面 → 导入。导入后 daemon 约 15 秒内热重载。</span>
+        <textarea id="curl-text" placeholder="curl 'https://...' -H 'cookie: ...' ..."></textarea>
+      </div>
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn primary" id="btn-import-curl" onclick="importCurl()">导入会话</button>
+        <button class="btn" onclick="clearCurl()">清空</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 日志 -->
+  <div id="tab-logs" style="display:none">
+    <div class="card">
+      <h2>运行日志 <span class="hint">logs/sync.log（引擎 + 服务）</span></h2>
+      <div class="btn-row" style="margin-bottom:10px">
+        <select id="log-lines" style="width:110px"><option>100</option><option selected>300</option><option>1000</option></select>
+        <label style="font-size:13px"><input type="checkbox" id="log-auto" style="vertical-align:-2px"> 自动刷新（5 秒）</label>
+        <button class="btn" onclick="loadLogs()">刷新</button>
+      </div>
+      <pre class="logs" id="log-view">加载中…</pre>
+    </div>
+  </div>
+</div>
+
+<div id="toast-box"></div>
+<div id="overlay"><div class="modal" id="modal-body"></div></div>
+
+<script>
+"use strict";
+/* ---------- 基础工具 ---------- */
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function toast(msg, type = "") {
+  const box = $("toast-box");
+  const el = document.createElement("div");
+  el.className = "toast " + type;
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(() => { el.style.opacity = "0"; el.style.transition = "opacity .3s"; }, 2400);
+  setTimeout(() => el.remove(), 2800);
+}
+
+function modalConfirm(title, html, onOk, okText = "确认") {
+  $("modal-body").innerHTML =
+    `<h3>${esc(title)}</h3><div>${html}</div>
+     <div class="actions">
+       <button class="btn" onclick="closeModal()">取消</button>
+       <button class="btn danger" onclick="modalOk()">${esc(okText)}</button>
+     </div>`;
+  window._modalOk = onOk;
+  $("overlay").classList.add("show");
+}
+function closeModal() { $("overlay").classList.remove("show"); }
+function modalOk() { closeModal(); const f = window._modalOk; window._modalOk = null; if (f) f(); }
+
+async function api(path, opts = {}) {
+  const init = { headers: { "Content-Type": "application/json" }, ...opts };
+  if (init.body && typeof init.body !== "string") init.body = JSON.stringify(init.body);
+  let res, data;
+  try { res = await fetch("./api/" + path, init); }
+  catch (e) { throw new Error("网络请求失败：" + e.message); }
+  try { data = await res.json(); } catch (e) { throw new Error(`HTTP ${res.status}（响应非 JSON）`); }
+  if (!res.ok || data.success === false) {
+    if (data.status === "busy") { const err = new Error(data.message || "任务进行中"); err.busy = true; throw err; }
+    throw new Error(data.message || data.error || `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+/* ---------- 标签页 ---------- */
+let currentTab = "status";
+const timers = {};
+document.querySelectorAll("#tabs button").forEach(btn => {
+  btn.onclick = () => switchTab(btn.dataset.tab);
+});
+function switchTab(name) {
+  currentTab = name;
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  for (const t of ["status", "settings", "albums", "auth", "logs"]) {
+    $("tab-" + t).style.display = t === name ? "" : "none";
+  }
+  Object.values(timers).forEach(clearInterval);
+  for (const k of Object.keys(timers)) delete timers[k];
+  if (name === "status") { refreshStatus(); timers.status = setInterval(refreshStatus, 15000); }
+  if (name === "settings") loadConfig();
+  if (name === "albums") loadAlbums();
+  if (name === "auth") { refreshAuth(); timers.auth = setInterval(refreshAuth, 10000); }
+  if (name === "logs") { loadLogs(); timers.logs = setInterval(() => { if ($("log-auto").checked) loadLogs(); }, 5000); }
+}
+
+/* ---------- 状态总览 ---------- */
+const REPORT_KEYS = [
+  ["scanned", "扫描", ""], ["downloaded", "新下载", "green"], ["skipped_existing", "已存在跳过", ""],
+  ["skipped_filtered", "被过滤跳过", ""], ["deleted_local", "本地删除", "red"],
+  ["deleted_cloud", "云端移除", "red"], ["failed", "失败", "red"], ["duration_sec", "耗时(秒)", ""],
+];
+const STORE_KEYS = [["ok", "正常"], ["expired", "已失效"], ["pending", "待处理"], ["failed", "失败"]];
+
+function fmtTs(ts) {
+  if (!ts) return "—";
+  const d = new Date(typeof ts === "number" ? ts * 1000 : ts);
+  return isNaN(d) ? "—" : d.toLocaleString("zh-CN");
+}
+
+async function refreshStatus() {
+  let s;
+  try { s = await api("status"); } catch (e) {
+    $("auth-summary").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return;
+  }
+  $("ver").textContent = s.version || "-";
+  $("uptime").textContent = s.uptime_sec != null ? `已运行 ${Math.floor(s.uptime_sec / 60)} 分钟` : "";
+
+  const badge = $("auth-badge");
+  badge.className = "badge " + (s.auth_valid ? "ok" : "err");
+  badge.textContent = s.auth_valid ? "登录态有效" : "登录态失效";
+
+  const banner = $("status-banner");
+  if (!s.daemon_running) banner.innerHTML = `<div class="banner err">同步守护进程未运行——请尝试重启应用，或查看日志页排查。</div>`;
+  else if (s.last_error) banner.innerHTML = `<div class="banner warn">最近错误：${esc(s.last_error)}</div>`;
+  else banner.innerHTML = "";
+
+  const a = s.auth || {};
+  $("auth-summary").innerHTML =
+    `<div class="kv">
+      <span class="k">会话凭据</span><span>${a.has_session ? "存在（auth.json）" : "不存在"}</span>
+      <span class="k">华为用户 ID</span><span>${esc(a.user_id || "—")}</span>
+      <span class="k">图库解锁级别</span><span>${a.login_sec_level == 2 ? "2（完整，可同步）" : a.login_sec_level == 1 ? "1（受限，需二次验证解锁）" : "—"}</span>
+      <span class="k">CAS 会话</span><span>${a.has_cas_tgt ? "有效" : "无"}</span>
+      <span class="k">已保存账号密码</span><span>${a.credentials_configured ? "是" : "否（可用 cURL 导入）"}</span>
+      <span class="k">最近心跳</span><span>${fmtTs(s.last_heartbeat_at)}</span>
+      <span class="k">最近同步</span><span>${fmtTs(s.last_sync_at)}</span>
+      <span class="k">最近全量扫描</span><span>${fmtTs(s.last_full_scan_at)}</span>
+      <span class="k">守护进程</span><span>${s.daemon_running ? "运行中" : "已停止"}</span>
+    </div>`;
+
+  const r = s.last_report;
+  $("sync-time-hint").textContent = s.last_sync_at ? `（${fmtTs(s.last_sync_at)}）` : "";
+  $("report-grid").innerHTML = r
+    ? REPORT_KEYS.map(([k, lbl, cls]) =>
+        `<div class="stat ${cls}"><div class="num">${r[k] ?? "-"}</div><div class="lbl">${lbl}</div></div>`).join("")
+    : `<div class="empty" style="grid-column:1/-1">暂无同步记录</div>`;
+
+  const sc = s.store_counts || {};
+  const keys = STORE_KEYS.filter(([k]) => sc[k] != null);
+  $("store-grid").innerHTML = keys.length
+    ? keys.map(([k, lbl]) => `<div class="stat"><div class="num">${sc[k]}</div><div class="lbl">${lbl}</div></div>`).join("")
+    : `<div class="empty" style="grid-column:1/-1">暂无记录</div>`;
+}
+
+async function triggerSync() {
+  const btn = $("btn-sync"); btn.disabled = true;
+  try {
+    const r = await api("sync/trigger", { method: "POST", body: {} });
+    toast(r.message || "已触发立即同步", "ok");
+    setTimeout(refreshStatus, 3000);
+  } catch (e) { toast(e.message, "err"); }
+  finally { btn.disabled = false; }
+}
+
+let dryTimer = null;
+async function startDryRun() {
+  const btn = $("btn-dry"); btn.disabled = true;
+  try {
+    const r = await api("sync/dry-run", { method: "POST", body: {} });
+    $("dry-status").innerHTML = `<span class="spin"></span> 预览进行中…`;
+    dryTimer = setInterval(pollDryRun, 2000);
+  } catch (e) {
+    if (!e.busy) toast(e.message, "err");
+    else $("dry-status").innerHTML = `<span class="spin"></span> 已有预览进行中…`, dryTimer = setInterval(pollDryRun, 2000);
+  } finally { btn.disabled = false; }
+}
+async function pollDryRun() {
+  let s;
+  try { s = (await api("sync/dry-run")).dry_run; } catch (e) { return; }
+  if (!s.running) {
+    clearInterval(dryTimer); dryTimer = null;
+    if (s.error) { $("dry-status").textContent = ""; toast("预览失败：" + s.error, "err"); return; }
+    const r = s.report;
+    $("dry-status").textContent = "";
+    modalConfirm("dry-run 预览结果（不写入任何数据）", `
+      <div class="stat-grid" style="grid-template-columns:repeat(4,1fr)">
+        ${REPORT_KEYS.map(([k, lbl, cls]) => `<div class="stat ${cls}"><div class="num">${r[k] ?? "-"}</div><div class="lbl">${lbl}</div></div>`).join("")}
+      </div>`, () => {}, "关闭");
+    $("modal-body").querySelector(".btn.danger").className = "btn primary";
+  }
+}
+
+/* ---------- 同步设置 ---------- */
+const BOOL_FIELDS = [
+  ["f-skip_videos", "skip_videos", "跳过视频", "只同步照片"],
+  ["f-skip_photos", "skip_photos", "跳过照片", "只同步视频"],
+  ["f-skip_live_photos", "skip_live_photos", "跳过实况照", "Live Photo 动态部分一并跳过"],
+  ["f-skip_bursts", "skip_bursts", "跳过连拍", "连拍组仅保留代表图"],
+  ["f-only_favorites", "only_favorites", "仅收藏", "只同步标记为收藏的照片"],
+  ["f-auto_delete", "auto_delete", "镜像删除", "云端删除/移入回收站后，删除本地对应文件"],
+  ["f-delete_after_download", "delete_after_download", "下载后删除云端", "下载成功后把云端文件移入回收站"],
+];
+const switchState = {};
+
+function renderSwitches() {
+  const mk = (prefix, arr) => arr.map(([id, key, lbl, desc]) =>
+    `<div class="switch-row"><input type="checkbox" id="${id}">
+      <div><div class="lbl">${lbl}</div><div class="desc">${desc}</div></div></div>`).join("");
+  $("skip-switches").innerHTML = mk("f-", BOOL_FIELDS.slice(0, 5));
+  $("delete-switches").innerHTML =
+    mk("f-", BOOL_FIELDS.slice(5)) +
+    `<div class="switch-row"><div>
+      <div class="lbl">云端仅保留最近 N 天</div>
+      <div class="desc">下载后把云端超过 N 天的文件移入回收站（留空不启用）</div>
+      <input type="number" id="f-keep_cloud_recent_days" min="1" style="width:110px;margin-top:6px" placeholder="不限">
+    </div></div>`;
+  for (const [id, key] of BOOL_FIELDS) {
+    $(id).addEventListener("change", () => switchState[key] = $(id).checked);
+  }
+}
+
+function mbToBytes(v) { return v === "" || v == null ? null : Math.round(parseFloat(v) * 1024 * 1024); }
+function bytesToMb(v) { return v == null ? "" : String(Math.round(v / 1024 / 1024 * 100) / 100); }
+
+async function loadConfig(notify) {
+  if (!$("f-skip_videos")) renderSwitches();
+  let c;
+  try { c = (await api("config")).config; }
+  catch (e) { toast("加载配置失败：" + e.message, "err"); return; }
+  $("f-username").value = c.username || "";
+  $("f-password").value = "";
+  $("f-password-clear").checked = false;
+  $("f-photos_dir").value = c.photos_dir || "";
+  probePhotosDir(c.photos_dir || "");
+  $("f-folder_structure").value = c.folder_structure || "";
+  $("f-timezone").value = c.timezone || "Asia/Shanghai";
+  $("f-photo_size").value = c.photo_size || "original";
+  $("f-file_match_policy").value = c.file_match_policy || "name-size-dedup-with-suffix";
+  $("f-live_photo_mov_filename_policy").value = c.live_photo_mov_filename_policy || "none";
+  $("f-created_after").value = c.created_after || "";
+  $("f-created_before").value = c.created_before || "";
+  $("f-min_size").value = bytesToMb(c.min_size);
+  $("f-max_size").value = bytesToMb(c.max_size);
+  $("f-recent").value = c.recent ?? "";
+  $("f-until_found").value = c.until_found ?? "";
+  for (const [id, key] of BOOL_FIELDS) { $(id).checked = !!c[key]; switchState[key] = !!c[key]; }
+  $("f-keep_cloud_recent_days").value = c.keep_cloud_recent_days ?? "";
+  $("f-download_concurrency").value = c.download_concurrency ?? 2;
+  $("f-page_size").value = c.page_size ?? 100;
+  $("f-request_delay_ms").value = c.request_delay_ms ?? 120;
+  $("f-set_exif_datetime").value = String(!!c.set_exif_datetime);
+  $("f-xmp_sidecar").value = String(!!c.xmp_sidecar);
+  $("f-cron").value = c.cron || "";
+  $("f-watch_interval").value = c.watch_interval ?? "";
+  $("f-keepalive_interval").value = c.keepalive_interval ?? 60;
+  $("f-run_on_startup").value = String(c.run_on_startup !== false);
+  $("f-full_scan_interval_hours").value = c.full_scan_interval_hours ?? 168;
+  $("f-webhook_url").value = c.webhook_url || "";
+  $("f-telegram_chat_id").value = c.telegram_chat_id || "";
+  $("f-notification_script").value = c.notification_script || "";
+  $("f-log_level").value = c.log_level || "INFO";
+  if (notify) toast("已还原为已保存配置", "ok");
+}
+
+async function saveConfig() {
+  const btn = $("btn-save-config"); btn.disabled = true;
+  const numOrNull = (v, parse = parseInt) => (v === "" || v == null ? null : parse(v));
+  const payload = {
+    username: $("f-username").value.trim(),
+    photos_dir: $("f-photos_dir").value.trim(),
+    folder_structure: $("f-folder_structure").value.trim() || "{:%Y/%m/%d}",
+    timezone: $("f-timezone").value.trim() || "Asia/Shanghai",
+    photo_size: $("f-photo_size").value,
+    file_match_policy: $("f-file_match_policy").value,
+    live_photo_mov_filename_policy: $("f-live_photo_mov_filename_policy").value,
+    created_after: $("f-created_after").value || null,
+    created_before: $("f-created_before").value || null,
+    min_size: mbToBytes($("f-min_size").value),
+    max_size: mbToBytes($("f-max_size").value),
+    recent: numOrNull($("f-recent").value),
+    until_found: numOrNull($("f-until_found").value),
+    skip_videos: switchState.skip_videos || false,
+    skip_photos: switchState.skip_photos || false,
+    skip_live_photos: switchState.skip_live_photos || false,
+    skip_bursts: switchState.skip_bursts || false,
+    only_favorites: switchState.only_favorites || false,
+    auto_delete: switchState.auto_delete || false,
+    delete_after_download: switchState.delete_after_download || false,
+    keep_cloud_recent_days: numOrNull($("f-keep_cloud_recent_days").value),
+    download_concurrency: numOrNull($("f-download_concurrency").value) || 2,
+    page_size: numOrNull($("f-page_size").value) || 100,
+    request_delay_ms: numOrNull($("f-request_delay_ms").value) || 120,
+    set_exif_datetime: $("f-set_exif_datetime").value === "true",
+    xmp_sidecar: $("f-xmp_sidecar").value === "true",
+    cron: $("f-cron").value.trim() || null,
+    watch_interval: numOrNull($("f-watch_interval").value),
+    keepalive_interval: numOrNull($("f-keepalive_interval").value) || 60,
+    run_on_startup: $("f-run_on_startup").value === "true",
+    full_scan_interval_hours: numOrNull($("f-full_scan_interval_hours").value, parseFloat) ?? 168,
+    webhook_url: $("f-webhook_url").value.trim() || null,
+    telegram_chat_id: $("f-telegram_chat_id").value.trim() || null,
+    notification_script: $("f-notification_script").value.trim() || null,
+    log_level: $("f-log_level").value,
+  };
+  const pw = $("f-password").value;
+  if ($("f-password-clear").checked) payload.password = "__clear__";
+  else if (pw) payload.password = pw;
+
+  if (switchState.delete_after_download || payload.keep_cloud_recent_days != null) {
+    const ok = await new Promise(resolve => modalConfirm("危险操作确认",
+      "已开启「下载后删除云端」或「云端仅保留 N 天」：同步会把云端对应文件<strong>移入回收站</strong>。请确认理解后再保存。",
+      () => resolve(true), "确认保存"));
+    if (!ok) { btn.disabled = false; return; }
+  }
+  try {
+    const r = await api("config", { method: "POST", body: payload });
+    toast(r.message || "配置已保存", "ok");
+    loadConfig();
+  } catch (e) { toast("保存失败：" + e.message, "err"); }
+  finally { btn.disabled = false; }
+}
+
+// --- 照片存储目录选择（fnOS 授权目录实时探测） ---
+
+async function openPhotosDirPicker() {
+  $("modal-body").innerHTML =
+    `<h3>选择照片存储目录</h3>
+     <div id="pd-list" class="pd-list"><div class="tip">探测中…</div></div>
+     <div class="actions">
+       <button class="btn" onclick="loadPhotosDirs()">刷新</button>
+       <button class="btn" onclick="closeModal()">关闭</button>
+     </div>`;
+  $("overlay").classList.add("show");
+  await loadPhotosDirs();
+}
+
+async function loadPhotosDirs() {
+  const box = $("pd-list");
+  if (!box) return;
+  box.innerHTML = '<div class="tip">探测中…</div>';
+  const hint = '<div class="tip" style="margin-top:8px">找不到目标目录？在 fnOS「系统设置→应用→相册同步→应用设置→访问权限」中添加后（授权立即生效，无需重启）点「刷新」。</div>';
+  try {
+    const data = await api("photos_dirs");
+    const dirs = (data && data.dirs) || [];
+    if (!dirs.length) {
+      box.innerHTML = '<div class="tip">未探测到可访问的目录。</div>' + hint;
+      return;
+    }
+    const rows = dirs.map(d => {
+      const badge = d.writable ? '<span class="pd-badge ok">可写</span>'
+        : d.readable ? '<span class="pd-badge ro">只读</span>'
+        : '<span class="pd-badge no">未授权</span>';
+      const pickable = d.writable || d.readable;
+      const onclick = pickable
+        ? ` onclick='pickPhotosDir(${esc(JSON.stringify(d.path))}${d.writable ? "" : ",true"})'`
+        : "";
+      return `<div class="pd-row${pickable ? "" : " pd-disabled"}"${onclick}><span class="pd-path">${esc(d.path)}</span>${d.custom ? '<span class="chip">手动</span>' : ""}${badge}</div>`;
+    }).join("");
+    box.innerHTML = rows + hint;
+  } catch (e) {
+    box.innerHTML = `<div class="tip">探测失败：${esc(e.message || e)}</div>` + hint;
+  }
+}
+
+function pickPhotosDir(path, readonly) {
+  $("f-photos_dir").value = path;
+  closeModal();
+  probePhotosDir(path);
+  if (readonly) toast("注意：该目录当前仅只读，引擎可能无法写入", "warn");
+}
+
+// 手输路径实时探测（防抖 450ms，与 fnOS 授权状态实时一致）
+let pdProbeTimer = null;
+function probePhotosDir(value) {
+  clearTimeout(pdProbeTimer);
+  const box = $("pd-probe");
+  if (!box) return;
+  const path = (value || "").trim();
+  if (!path) { box.innerHTML = ""; return; }
+  pdProbeTimer = setTimeout(async () => {
+    box.innerHTML = '<span class="pd-badge no">探测中…</span>';
+    try {
+      const data = await api("photos_dirs/check?path=" + encodeURIComponent(path));
+      const p = data && data.probe;
+      if (!p) { box.innerHTML = ""; return; }
+      box.innerHTML = !p.exists ? '<span class="pd-badge no">目录不存在</span>'
+        : p.writable ? `<span class="pd-badge ok">可写</span>${p.registered ? "" : ' <a href="javascript:void(0)" class="pd-add" onclick="addCustomPhotosDir()">登记到可选目录</a>'}`
+        : p.readable ? '<span class="pd-badge ro">只读</span>'
+        : '<span class="pd-badge no">未授权（去 fnOS 应用设置→访问权限 添加）</span>';
+    } catch (e) {
+      box.innerHTML = '<span class="pd-badge no">探测失败</span>';
+    }
+  }, 450);
+}
+
+// 登记当前输入的路径到「可选目录」清单（服务端探测可写才入库，去重不重启服务）
+async function addCustomPhotosDir() {
+  const path = ($("f-photos_dir").value || "").trim();
+  if (!path) return;
+  try {
+    const r = await api("photos_dirs/custom", { method: "POST", body: { path } });
+    toast(r.message || "已添加到可选目录", "ok");
+    probePhotosDir(path);              // 重探刷新徽章区（已登记则不再显示登记链接）
+    if ($("pd-list")) loadPhotosDirs(); // 目录弹窗开着则同步刷新
+  } catch (e) { toast("添加失败：" + (e.message || e), "err"); }
+}
+
+/* ---------- cron 选择器 ---------- */
+const CRON_PRESETS = [
+  ["*/5 * * * *", "每 5 分钟"],
+  ["*/30 * * * *", "每 30 分钟"],
+  ["0 * * * *", "每小时整点"],
+  ["0 */2 * * *", "每 2 小时"],
+  ["0 3 * * *", "每天 03:00"],
+  ["0 12 * * *", "每天 12:00"],
+  ["0 3 * * 1", "每周一 03:00"],
+  ["0 3 1 * *", "每月 1 日 03:00"],
+  ["@hourly", "@hourly（每小时）"],
+  ["@daily", "@daily（每天 00:00）"],
+  ["@weekly", "@weekly（每周日 00:00）"],
+];
+
+function openCronPicker() {
+  const cur = $("f-cron").value.trim();
+  const isPreset = CRON_PRESETS.some(([e]) => e === cur);
+  const parsed = parseCronToBuilder(cur);
+  $("modal-body").innerHTML = `
+    <h3>选择定时计划</h3>
+    <div class="cron-top">
+      <span class="cron-lbl">常用预设</span>
+      <select id="cron-preset-select" onchange="onCronPresetSelect()">
+        <option value="" ${!cur ? "selected" : ""}>— 选择常用预设 —</option>
+        ${CRON_PRESETS.map(([e, l]) => `<option value="${esc(e)}" ${cur === e ? "selected" : ""}>${esc(e)}　${esc(l)}</option>`).join("")}
+        ${cur && !isPreset ? `<option value="${esc(cur)}" selected>${esc(cur)}　当前配置</option>` : ""}
+      </select>
+      <span class="cron-lbl">表达式（分 时 日 月 周，支持 <b>* , - /</b> 与 @daily 等宏）</span>
+      <input type="text" id="cron-custom-input" placeholder="如 30 4 * * * 或 @daily" value="${esc(cur)}" oninput="onCronManualInput()">
+    </div>
+    <div class="cron-builder">
+      <div class="cb-title">可视化构造　<span class="cb-cur" id="cb-cur">${esc(cur || "未设置")}</span></div>
+      <div class="cb-tabs" id="cb-tabs"></div>
+      <div class="cb-panel" id="cb-panel"></div>
+      <div class="tip" id="cron-builder-tip"></div>
+    </div>
+    <div class="cron-preview">
+      <div class="cp-title">最近 5 次运行时间（本机时区）</div>
+      <ul id="cron-preview-list"><li class="warn">—</li></ul>
+    </div>
+    <div class="actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="applyCronPick()">确定</button>
+    </div>`;
+  $("overlay").classList.add("show");
+  cronBuilderDirty = false;
+  initCronBuilderState(parsed);
+  renderCronBuilder();
+  refreshCronPreview();
+}
+
+/* ---------- cron 可视化构造器（Tab 化，中心化状态） ---------- */
+let cronBuilderDirty = false; // 用户动过构造器后才允许回写自定义表达式框
+let CB_TAB = "min";
+const CB_STATE = {};
+const CRON_BUILDER_DIMS = [
+  { key: "min",  label: "分钟", min: 0, max: 59 },
+  { key: "hour", label: "小时", min: 0, max: 23 },
+  { key: "dom",  label: "日",   min: 1, max: 31 },
+  { key: "mon",  label: "月",   min: 1, max: 12 },
+  { key: "dow",  label: "星期", min: 0, max: 6 },
+];
+const CRON_DOW_NAMES = ["日", "一", "二", "三", "四", "五", "六"];
+
+function initCronBuilderState(parsed) {
+  CRON_BUILDER_DIMS.forEach((d) => {
+    CB_STATE[d.key] = {
+      mode: parsed[d.key].mode, base: parsed[d.key].base, step: parsed[d.key].step,
+      a: parsed[d.key].a, b: parsed[d.key].b, list: new Set(parsed[d.key].list),
+    };
+  });
+  CB_TAB = "min";
+}
+
+function cbDim(key) { return CRON_BUILDER_DIMS.find((d) => d.key === key); }
+
+function renderCronBuilder() {
+  $("cb-tabs").innerHTML = CRON_BUILDER_DIMS.map((d) =>
+    `<button type="button" class="cb-tab${CB_TAB === d.key ? " active" : ""}" onclick="onCronTab('${d.key}')">${d.label}</button>`).join("");
+  const d = cbDim(CB_TAB), st = CB_STATE[CB_TAB];
+  const nums = [];
+  for (let v = d.min; v <= d.max; v++) nums.push(v);
+  const gridLabel = CB_TAB === "dow" ? (v) => `${v}周${CRON_DOW_NAMES[v]}` : (v) => String(v);
+  $("cb-panel").innerHTML = `
+    <div class="cb-modes">
+      <label><input type="radio" name="cb-mode" value="any" ${st.mode === "any" ? "checked" : ""} onchange="onCronMode('any')">任意(*)</label>
+      <label><input type="radio" name="cb-mode" value="step" ${st.mode === "step" ? "checked" : ""} onchange="onCronMode('step')">
+        <span class="cb-inline">从 <input type="number" min="${d.min}" max="${d.max}" value="${st.base}" ${st.mode === "step" ? "" : "disabled"} oninput="onCronNum('base',this)"> 开始，每 <input type="number" min="1" max="${d.max - d.min || 1}" value="${st.step}" ${st.mode === "step" ? "" : "disabled"} oninput="onCronNum('step',this)"> 执行</span></label>
+      <label><input type="radio" name="cb-mode" value="range" ${st.mode === "range" ? "checked" : ""} onchange="onCronMode('range')">
+        <span class="cb-inline">范围 <input type="number" min="${d.min}" max="${d.max}" value="${st.a}" ${st.mode === "range" ? "" : "disabled"} oninput="onCronNum('a',this)"> 到 <input type="number" min="${d.min}" max="${d.max}" value="${st.b}" ${st.mode === "range" ? "" : "disabled"} oninput="onCronNum('b',this)"></span></label>
+      <label><input type="radio" name="cb-mode" value="list" ${st.mode === "list" ? "checked" : ""} onchange="onCronMode('list')">指定</label>
+    </div>
+    <div class="cb-grid" style="display:${st.mode === "list" ? "grid" : "none"}">
+      ${nums.map((v) => `<label><input type="checkbox" value="${v}" ${st.list.has(v) ? "checked" : ""} onchange="onCronCheck(this)">${gridLabel(v)}</label>`).join("")}
+    </div>`;
+  updateCronBuilderTip();
+}
+
+function onCronTab(key) { CB_TAB = key; renderCronBuilder(); }
+
+function onCronMode(mode) {
+  cronBuilderDirty = true;
+  CB_STATE[CB_TAB].mode = mode;
+  renderCronBuilder();
+  syncCronBuilderToExpr();
+}
+
+function onCronNum(field, el) {
+  cronBuilderDirty = true;
+  const d = cbDim(CB_TAB);
+  let v = parseInt(el.value, 10);
+  if (isNaN(v)) v = d.min;
+  v = Math.min(d.max, Math.max(d.min, v));
+  el.value = v;
+  CB_STATE[CB_TAB][field] = v;
+  syncCronBuilderToExpr();
+}
+
+function onCronCheck(el) {
+  cronBuilderDirty = true;
+  const st = CB_STATE[CB_TAB];
+  const v = parseInt(el.value, 10);
+  if (el.checked) { st.list.add(v); st.mode = "list"; }
+  else {
+    st.list.delete(v);
+    if (!st.list.size) st.mode = "any";
+  }
+  renderCronBuilder();
+  syncCronBuilderToExpr();
+}
+
+function onCronPresetSelect() {
+  const expr = $("cron-preset-select").value;
+  if (!expr) return;
+  $("cron-custom-input").value = expr;
+  initCronBuilderState(parseCronToBuilder(expr));
+  cronBuilderDirty = false; // 选择预设不算构造器改动
+  renderCronBuilder();
+  syncCronBuilderToExpr(); // 同步 cb-cur 与预览（dirty=false 不会写回手写框）
+}
+
+function onCronManualInput() {
+  // 手写实时反解析回填构造器（只刷新预览，不写回手写框避免循环）
+  initCronBuilderState(parseCronToBuilder($("cron-custom-input").value));
+  cronBuilderDirty = false;
+  renderCronBuilder();
+  syncCronBuilderToExpr();
+}
+
+function fieldToCron(key, st) {
+  if (st.mode === "any") return "*";
+  if (st.mode === "step") return st.base === 0 ? `*/${st.step}` : `${st.base}/${st.step}`;
+  if (st.mode === "range") return st.a === st.b ? String(st.a) : `${st.a}-${st.b}`;
+  if (st.mode === "list") {
+    if (!st.list.size) return "*";
+    return [...st.list].sort((x, y) => x - y).join(",");
+  }
+  return "*";
+}
+
+function updateCronBuilderTip() {
+  const tip = $("cron-builder-tip");
+  if (!tip) return;
+  const dom = CB_STATE.dom, dow = CB_STATE.dow;
+  tip.textContent = (dom.mode !== "any" && dow.mode !== "any")
+    ? "注意：日与星期同时指定时，Linux cron 按「任一匹配即执行」处理"
+    : "";
+}
+
+function syncCronBuilderToExpr() {
+  const expr = CRON_BUILDER_DIMS.map((d) => fieldToCron(d.key, CB_STATE[d.key])).join(" ");
+  const curEl = $("cb-cur");
+  if (curEl) curEl.textContent = expr;
+  if (cronBuilderDirty) {
+    const input = $("cron-custom-input");
+    if (input) input.value = expr;
+  }
+  updateCronBuilderTip();
+  refreshCronPreview();
+}
+
+function parseCronToBuilder(expr) {
+  const blank = () => ({ mode: "any", base: 0, step: 1, a: 0, b: 1, list: new Set() });
+  const st = { min: blank(), hour: blank(), dom: blank(), mon: blank(), dow: blank() };
+  st.dom.a = 1; st.dom.b = 15; st.mon.a = 1; st.mon.b = 12; st.dow.a = 1; st.dow.b = 5;
+  st.dow.list = new Set([1]); st.dom.list = new Set([1]); st.mon.list = new Set([1]);
+  const keys = ["min", "hour", "dom", "mon", "dow"];
+  const raw = (expr || "").trim().toLowerCase();
+  const m = (CRON_MACROS[raw] || raw).match(/^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$/);
+  if (!m) return st;
+  keys.forEach((key, i) => {
+    const tok = m[i + 1];
+    const dim = CRON_BUILDER_DIMS.find((d) => d.key === key);
+    const one = (t) => {
+      if (t === "*") { st[key].mode = "any"; return true; }
+      let mm = t.match(/^\*\/(\d+)$/);
+      if (mm) { st[key].mode = "step"; st[key].base = dim.min; st[key].step = Math.max(1, parseInt(mm[1], 10)); return true; }
+      mm = t.match(/^(\d+)\/(\d+)$/);
+      if (mm) { st[key].mode = "step"; st[key].base = parseInt(mm[1], 10); st[key].step = Math.max(1, parseInt(mm[2], 10)); return true; }
+      mm = t.match(/^(\d+)-(\d+)$/);
+      if (mm) { st[key].mode = "range"; st[key].a = parseInt(mm[1], 10); st[key].b = parseInt(mm[2], 10); return true; }
+      mm = t.match(/^(\d+(,\d+)*)$/);
+      if (mm) { st[key].mode = "list"; st[key].list = new Set(t.split(",").map((x) => parseInt(x, 10))); return true; }
+      return false;
+    };
+    if (!one(tok)) st[key].mode = "any";
+  });
+  return st;
+}
+
+/* ---------- cron 预览：最近 5 次运行时间 ---------- */
+const CRON_MACROS = {
+  "@hourly": "0 * * * *", "@daily": "0 0 * * *", "@midnight": "0 0 * * *",
+  "@weekly": "0 0 * * 0", "@monthly": "0 0 1 * *", "@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *",
+};
+
+function parseCronField(tok, min, max) {
+  if (tok === "*") return null; // null = 全部匹配
+  const vals = new Set();
+  for (const part of tok.split(",")) {
+    let base = part, step = 1;
+    const si = part.indexOf("/");
+    if (si >= 0) { base = part.slice(0, si); step = parseInt(part.slice(si + 1), 10); }
+    if (!Number.isInteger(step) || step < 1) return undefined;
+    let lo = min, hi = max;
+    if (base !== "*" && base !== "") {
+      const ri = base.indexOf("-");
+      if (ri >= 0) {
+        lo = parseInt(base.slice(0, ri), 10); hi = parseInt(base.slice(ri + 1), 10);
+      } else {
+        lo = parseInt(base, 10);
+        if (si >= 0) hi = max; else hi = lo;
+      }
+    }
+    if (!Number.isInteger(lo) || !Number.isInteger(hi) || lo < min || hi > max || lo > hi) return undefined;
+    for (let v = lo; v <= hi; v += step) vals.add(v);
+  }
+  return vals;
+}
+
+function expandCronExpr(expr) {
+  let e = (expr || "").trim().toLowerCase();
+  if (CRON_MACROS[e]) e = CRON_MACROS[e]; // 宏先展开为 5 段表达式，再继续解析
+  const m = e.match(/^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$/);
+  if (!m) return null;
+  const min = parseCronField(m[1], 0, 59);
+  const hour = parseCronField(m[2], 0, 23);
+  const dom = parseCronField(m[3], 1, 31);
+  const mon = parseCronField(m[4], 1, 12);
+  let dow = parseCronField(m[5], 0, 7);
+  if (dow) { // 标准 cron：0 和 7 都是周日
+    if (dow.has(7)) { dow.add(0); dow.delete(7); }
+  }
+  if (min === undefined || hour === undefined || dom === undefined || mon === undefined || dow === undefined) return null;
+  return { min, hour, dom, mon, dow };
+}
+
+function nextCronRuns(expr, count = 5) {
+  const f = expandCronExpr(expr);
+  if (!f) return null;
+  const out = [];
+  const t = new Date();
+  t.setSeconds(0, 0);
+  t.setMinutes(t.getMinutes() + 1);
+  const domRestricted = f.dom !== null, dowRestricted = f.dow !== null;
+  for (let i = 0; i < 366 * 24 * 60 && out.length < count; i++) {
+    const mon = t.getMonth() + 1;
+    if (f.mon !== null && !f.mon.has(mon)) {
+      t.setMonth(t.getMonth() + 1, 1); t.setHours(0, 0, 0, 0); continue;
+    }
+    const domOK = domRestricted && f.dom.has(t.getDate());
+    const dowOK = dowRestricted && f.dow.has(t.getDay());
+    const dayOK = domRestricted && dowRestricted ? (domOK || dowOK)
+      : domRestricted ? domOK : dowRestricted ? dowOK : true;
+    if (dayOK && (!f.hour || f.hour.has(t.getHours())) && (!f.min || f.min.has(t.getMinutes()))) {
+      out.push(new Date(t));
+    }
+    t.setMinutes(t.getMinutes() + 1);
+  }
+  return out;
+}
+
+function refreshCronPreview() {
+  const input = $("cron-custom-input");
+  const listEl = $("cron-preview-list");
+  if (!input || !listEl) return;
+  const expr = input.value.trim();
+  if (!expr) { listEl.innerHTML = '<li class="warn">未设置（不按 cron 调度）</li>'; return; }
+  if (/^@\w+$/.test(expr) || /^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(expr)) {
+    const runs = nextCronRuns(expr, 5);
+    if (runs === null) { listEl.innerHTML = '<li class="warn">表达式无法解析，请检查格式</li>'; return; }
+    const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    const dowName = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+    listEl.innerHTML = runs.length
+      ? runs.map((d) => `<li>${fmt(d)} ${dowName[d.getDay()]}</li>`).join("")
+      : '<li class="warn">一年内没有匹配的执行时间，请检查表达式</li>';
+  } else {
+    listEl.innerHTML = '<li class="warn">应为 5 段（分 时 日 月 周）或 @ 宏</li>';
+  }
+}
+
+function applyCronPick() {
+  const expr = ($("cron-custom-input")?.value || "").trim();
+  if (expr && !/^(@\w+|\S+\s+\S+\s+\S+\s+\S+\s+\S+)$/.test(expr)) {
+    toast("表达式格式不正确：应为 5 段（分 时 日 月 周）或 @ 宏", "err"); return;
+  }
+  $("f-cron").value = expr;
+  closeModal();
+  if (expr) toast("已填入定时计划：" + expr, "ok");
+}
+
+/* ---------- 相册选择 ---------- */
+let albumData = [];
+let albumAllModeUI = null; // null = 未手动切换，按已保存配置推断（albums 为空 = 全部模式）
+
+function currentAllMode() {
+  if (albumAllModeUI !== null) return albumAllModeUI;
+  return (window._albumsCache || []).length === 0;
+}
+
+async function loadAlbums() {
+  $("album-error").innerHTML = "";
+  $("album-list").innerHTML = `<div class="empty">加载中…</div>`;
+  let albums;
+  try { albums = (await api("albums")).albums; }
+  catch (e) {
+    $("album-error").innerHTML = `<div class="banner err">获取相册失败：${esc(e.message)}${/登录|凭据|认证/i.test(e.message) ? "——请先到「认证与安全」完成登录。" : ""}</div>`;
+    $("album-list").innerHTML = ""; return;
+  }
+  albumData = albums;
+  if (!albums.length) { $("album-list").innerHTML = `<div class="empty">云端没有相册</div>`; return; }
+  renderAlbumList();
+}
+
+function renderAlbumList() {
+  const all = currentAllMode();
+  $("album-all-toggle").checked = all;
+  const selected = new Set((window._albumsCache || []));
+  const excluded = new Set((window._excludeCache || []));
+  $("album-hint").textContent = all
+    ? "当前：同步全部相册；勾选下方相册 = 排除（不同步）"
+    : "当前：手动选择；勾选要同步的相册";
+  $("album-list").innerHTML = albumData.map(a => {
+    const checked = all ? excluded.has(a.name) : selected.has(a.name);
+    return `
+    <div class="album-item">
+      <input type="checkbox" value="${all ? "exclude" : "include"}" data-name="${esc(a.name)}" ${checked ? "checked" : ""}>
+      <span class="name">${esc(a.name)}</span>
+      ${a.is_recycle ? `<span class="chip">回收站</span>` : ""}${a.hide ? `<span class="chip">隐藏</span>` : ""}${a.is_virtual ? `<span class="chip">虚拟</span>` : ""}
+      <span class="meta">${a.img_num ?? 0} 照片 / ${a.video_num ?? 0} 视频${all ? " · 勾选 = 排除" : ""}</span>
+    </div>`;
+  }).join("");
+}
+
+function onAllAlbumsToggle(on) {
+  albumAllModeUI = !!on;
+  renderAlbumList();
+}
+
+function selectAlbums(all) {
+  document.querySelectorAll('#album-list input[type=checkbox]').forEach(r => r.checked = !!all);
+}
+
+async function saveAlbums() {
+  const all = currentAllMode();
+  const picked = [];
+  document.querySelectorAll('#album-list input[type=checkbox]').forEach(r => {
+    if (r.checked) picked.push(r.dataset.name);
+  });
+  const body = all ? { albums: [], exclude_albums: picked } : { albums: picked, exclude_albums: [] };
+  try {
+    await api("config", { method: "POST", body });
+    window._albumsCache = body.albums;
+    window._excludeCache = body.exclude_albums;
+    albumAllModeUI = null;
+    renderAlbumList();
+    toast(all ? `已保存：同步全部相册${picked.length ? `（排除 ${picked.length} 个）` : ""}`
+              : `已保存：同步 ${picked.length} 个相册`, "ok");
+  } catch (e) { toast("保存失败：" + e.message, "err"); }
+}
+
+/* ---------- 认证与安全 ---------- */
+async function refreshAuth() {
+  let a;
+  try { a = await api("auth/status"); } catch (e) {
+    $("auth-panel").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return;
+  }
+  const lvl = a.login_sec_level == 2 ? "2（完整访问）" : a.login_sec_level == 1 ? "1（受限，待解锁）" : "—";
+  $("auth-panel").innerHTML = `
+    <div class="kv">
+      <span class="k">会话凭据</span><span>${a.has_session ? '<span class="badge ok">存在</span>' : '<span class="badge err">无</span>'}</span>
+      <span class="k">华为用户 ID</span><span>${esc(a.user_id || "—")}</span>
+      <span class="k">图库解锁级别</span><span>${lvl}</span>
+      <span class="k">CAS 会话</span><span>${a.has_cas_tgt ? "有效" : "无"}</span>
+      <span class="k">账号密码</span><span>${a.credentials_configured ? "已保存" : "未保存（可 cURL 导入）"}</span>
+      ${a.pending_2fa ? `<span class="k">待二次验证</span><span><span class="badge warn">${esc(a.pending_2fa.flow || "")}</span> ${fmtTs(a.pending_2fa.created_at)}</span>` : ""}
+    </div>`;
+  if (a.pending_2fa && a.pending_2fa.channels && a.pending_2fa.channels.length) {
+    showTwoFa(a.pending_2fa.channels, "检测到未完成的二次验证（验证码可能已发送），可直接提交：");
+  }
+}
+
+function showTwoFa(channels, note) {
+  $("twofa-panel").style.display = "";
+  $("twofa-code").value = "";
+  const list = (channels && channels.length ? channels : []).map((c, i) => `
+    <div class="chan-row"><input type="radio" name="chan" ${i === 0 ? "checked" : ""} data-chan='${esc(JSON.stringify(c))}'>
+      <span>${c.accountType === 1 ? "手机" : "邮箱"}：${esc(c.name || "-")}${c.sent ? "（验证码已发送）" : ""}</span></div>`).join("");
+  $("twofa-channels").innerHTML = `${note ? `<div class="tip" style="margin-bottom:6px">${esc(note)}</div>` : ""}
+    ${list || `<div class="tip">验证码已发送，直接输入即可。</div>`}`;
+}
+
+async function webLogin() {
+  const btn = $("btn-login"); btn.disabled = true;
+  $("login-output").innerHTML = `<span class="spin"></span> 登录中，最长约 30 秒…`;
+  $("twofa-panel").style.display = "none";
+  try {
+    const r = await api("auth/login", { method: "POST", body: {} });
+    if (r.status === "2fa_required") {
+      $("login-output").innerHTML = `<div class="banner warn">${esc(r.message)}</div>`;
+      showTwoFa(r.channels, "请选择接收通道并输入验证码：");
+    } else {
+      $("login-output").innerHTML = `<div class="banner" style="background:#e7f6ee;color:#147a45;border:1px solid #bfe8d1">${esc(r.message)}</div>`;
+      toast("登录成功", "ok");
+    }
+  } catch (e) {
+    $("login-output").innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    refreshAuth();
+  }
+}
+
+async function submit2fa() {
+  const code = $("twofa-code").value.trim();
+  if (!/^\d{6}$/.test(code)) { toast("请输入 6 位数字验证码", "err"); return; }
+  const btn = $("btn-2fa"); btn.disabled = true;
+  try {
+    const r = await api("auth/2fa", { method: "POST", body: { code } });
+    if (r.status === "2fa_required") {
+      showTwoFa(r.channels, "验证码校验未通过，请重新输入：");
+      toast("验证码校验未通过", "err");
+    } else {
+      $("twofa-panel").style.display = "none";
+      $("login-output").innerHTML = `<div class="banner" style="background:#e7f6ee;color:#147a45;border:1px solid #bfe8d1">${esc(r.message)}</div>`;
+      toast("二次验证通过", "ok");
+    }
+  } catch (e) { toast(e.message, "err"); }
+  finally { btn.disabled = false; refreshAuth(); }
+}
+
+async function importCurl() {
+  const text = $("curl-text").value.trim();
+  if (!text) { toast("请先粘贴 cURL 内容", "err"); return; }
+  const btn = $("btn-import-curl"); btn.disabled = true;
+  try {
+    const r = await api("auth/import-curl", { method: "POST", body: { curl: text } });
+    toast(r.message || "导入成功", "ok");
+    $("curl-text").value = "";
+  } catch (e) { toast(e.message, "err"); }
+  finally { btn.disabled = false; }
+}
+function clearCurl() { $("curl-text").value = ""; }
+
+/* ---------- 日志 ---------- */
+async function loadLogs() {
+  try {
+    const r = await api(`logs?lines=${$("log-lines").value}`);
+    const view = $("log-view");
+    view.textContent = r.lines.join("") || "（暂无日志）";
+    view.scrollTop = view.scrollHeight;
+  } catch (e) { $("log-view").textContent = "加载失败：" + e.message; }
+}
+
+/* ---------- 初始化 ---------- */
+window._albumsCache = window._albumsCache || [];
+window._excludeCache = window._excludeCache || [];
+(async function init() {
+  try {
+    const c = (await api("config")).config;
+    window._albumsCache = c.albums || [];
+    window._excludeCache = c.exclude_albums || [];
+  } catch (e) { /* 忽略，相册页会再加载 */ }
+  switchTab("status");
+})();
+</script>
+</body>
+</html>
