@@ -27,6 +27,13 @@ from providers.huawei import (
     make_huawei_auth_strategy,
     make_huawei_provider,
 )
+from providers.xiaomi import (
+    XIAOMI_CAPABILITIES,
+    XiaomiAuthStrategy,
+    XiaomiProvider,
+    make_xiaomi_auth_strategy,
+    make_xiaomi_provider,
+)
 
 
 @dataclass(frozen=True)
@@ -60,8 +67,13 @@ PLATFORMS: dict[str, PlatformSpec] = {
         provider_factory=make_huawei_provider,
         auth_strategy_factory=make_huawei_auth_strategy,
     ),
-    # T27 小米接入时在此登记：
-    # "xiaomi": PlatformSpec(platform="xiaomi", ...),
+    "xiaomi": PlatformSpec(
+        platform="xiaomi",
+        display_name="小米云相册",
+        capabilities=XIAOMI_CAPABILITIES,
+        provider_factory=make_xiaomi_provider,
+        auth_strategy_factory=make_xiaomi_auth_strategy,
+    ),
 }
 
 DEFAULT_PLATFORM = "huawei"
@@ -91,6 +103,8 @@ __all__ = [
     "ProviderCapabilities",
     "HuaweiProvider",
     "HuaweiAuthStrategy",
+    "XiaomiProvider",
+    "XiaomiAuthStrategy",
     "get_platform_spec",
     "known_platforms",
 ]

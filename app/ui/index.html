@@ -469,7 +469,7 @@ async function api(path, opts = {}) {
 }
 
 /* ---------- 导航（总览模式 / 账号工作区模式） ---------- */
-const PLATFORM_LABELS = { huawei: "华为云空间" };
+const PLATFORM_LABELS = { huawei: "华为云空间", xiaomi: "小米云相册" };
 const OVERVIEW_TABS = [["accounts", "账号管理"], ["overview", "状态总览"], ["global", "全局设置"]];
 const ACCOUNT_TABS = [["status", "同步状态"], ["settings", "同步设置"], ["albums", "相册选择"], ["auth", "认证与安全"], ["logs", "日志"]];
 const ui = { mode: "overview", tab: "accounts", current: null }; // current：当前账号 {id,name}
@@ -1603,15 +1603,15 @@ function renderWizard() {
       <div class="field"><label>平台</label>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
           <label style="display:flex;gap:8px;align-items:flex-start;border:1px solid var(--border);border-radius:8px;padding:10px 14px;cursor:pointer">
-            <input type="radio" name="w-platform" value="huawei" checked style="margin-top:3px">
+            <input type="radio" name="w-platform" value="huawei" checked style="margin-top:3px;cursor:pointer" onchange="wizInputPlatform('huawei')">
             <span><b>华为云空间</b><br><span class="tip">相册同步 / 2FA / cURL 导入</span></span></label>
-          <label style="display:flex;gap:8px;align-items:flex-start;border:1px dashed var(--border);border-radius:8px;padding:10px 14px;opacity:.5">
-            <input type="radio" disabled style="margin-top:3px">
-            <span><b>小米云空间</b><br><span class="tip">规划中</span></span></label>
+          <label style="display:flex;gap:8px;align-items:flex-start;border:1px solid var(--border);border-radius:8px;padding:10px 14px;cursor:pointer">
+            <input type="radio" name="w-platform" value="xiaomi" style="margin-top:3px;cursor:pointer" onchange="wizInputPlatform('xiaomi')">
+            <span><b>小米云相册</b><br><span class="tip">cookie 导入（免密码）· 不支持自动重登</span></span></label>
         </div></div>
-      <div class="field"><label>华为账号（手机号/邮箱）</label><input type="text" id="w-username" placeholder="用于登录态过期后自动重登，可留空" value="${esc(wiz.input.username)}">
+      <div class="field" id="w-cred-fields"><label>账号（手机号/邮箱）</label><input type="text" id="w-username" placeholder="用于登录态过期后自动重登，可留空" value="${esc(wiz.input.username)}">
       </div>
-      <div class="field"><label>密码</label><input type="password" id="w-password" placeholder="用于自动重登，可留空" value="${esc(wiz.input.password)}">
+      <div class="field" id="w-pass-fields"><label>密码</label><input type="password" id="w-password" placeholder="用于自动重登，可留空" value="${esc(wiz.input.password)}">
         <span class="tip">保存于应用私有数据目录（chmod 600），不发往任何第三方；也可创建后仅用 cURL 导入会话</span></div>
       <div class="actions">
         <button class="btn" onclick="closeModal()">取消</button>
@@ -1678,6 +1678,7 @@ function wizGoStep(n) { wiz.step = n; renderWizard(); }
 
 async function wizStep1() {
   const name = ($("w-name").value || "").trim();
+  const platform = (document.querySelector('input[name="w-platform"]:checked')?.value || "huawei");
   const username = ($("w-username").value || "").trim();
   const password = $("w-password").value;
   wiz.input.name = name; wiz.input.username = username; wiz.input.password = password;
@@ -1686,22 +1687,36 @@ async function wizStep1() {
     let r;
     if (wiz.id) {
       // 「上一步」回到第一步后再次提交：更新已有账号，避免重复创建
-      r = await api(`accounts/${wiz.id}`, { method: "PUT", body: { name, username, password } });
+      r = await api(`accounts/${wiz.id}`, { method: "PUT", body: { name, username, password, platform } });
       toast("凭据已更新，继续配置存储目录", "ok");
     } else {
       r = await api("accounts", {
         method: "POST",
         // T30.5：归属当前登录用户（普通用户服务端强制本人；admin 指定/缺省无主）
-        body: { name, username, password, platform: "huawei",
+        body: { name, username, password, platform,
                 owner: ME ? ME.user_id : "" },
       });
       wiz.id = r.account.id;
       toast("账号已创建（默认停用），继续配置存储目录", "ok");
     }
     wiz.name = r.account.name || name;
+    wiz.input.platform = platform;
     wiz.step = 2;
     renderWizard();
   } catch (e) { toast("保存失败：" + e.message, "err"); btn.disabled = false; }
+}
+
+// 向导第一步：切换平台时控制账号密码字段显隐
+function wizInputPlatform(p) {
+  const cred = $("w-cred-fields");
+  const pass = $("w-pass-fields");
+  if (p === "xiaomi") {
+    if (cred) cred.style.display = "none";
+    if (pass) pass.style.display = "none";
+  } else {
+    if (cred) cred.style.display = "";
+    if (pass) pass.style.display = "";
+  }
 }
 
 async function wizStep2() {

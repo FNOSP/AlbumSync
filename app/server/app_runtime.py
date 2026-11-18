@@ -870,13 +870,38 @@ class AccountRuntime:
                 session = self.strategy.get_session_if_present()
             except Exception as exc:
                 logger.warning("get_session_if_present failed: %s", exc)
-            probe = self.strategy.cas_probe()
+            # 防御：非华为平台（小米）无 cas_probe → 用 hasattr 兜底
+            if hasattr(self.strategy, "cas_probe"):
+                try:
+                    probe = self.strategy.cas_probe()
+                except Exception as exc:
+                    logger.warning("cas_probe failed: %s", exc)
+                    probe = {"pending_2fa": None, "has_cas_tgt": False, "credentials_configured": False}
+            else:
+                probe = {"pending_2fa": None, "has_cas_tgt": False,
+                         "credentials_configured": self.strategy.has_credentials()}
             pending = probe["pending_2fa"]
+            # 防御：session 可能是 XiaomiClient 实例（无 .user_id/.cookies/.updated_at 属性）
+            user_id = ""
+            login_sec_level = None
+            session_updated_at = None
+            if session is not None:
+                user_id = getattr(session, "user_id", "") or getattr(session, "account_id", "") or ""
+                cookies = getattr(session, "cookies", None)
+                if isinstance(cookies, dict):
+                    login_sec_level = cookies.get("loginSecLevel")
+                cookie_obj = getattr(session, "cookiejar", None)
+                if cookie_obj is not None and hasattr(cookie_obj, "__iter__"):
+                    for c in cookie_obj:
+                        if c.name == "userId":
+                            user_id = user_id or c.value
+                            break
+                session_updated_at = getattr(session, "updated_at", None)
             return {
                 "has_session": session is not None,
-                "user_id": getattr(session, "user_id", "") or "" if session else "",
-                "login_sec_level": (session.cookies.get("loginSecLevel") if session else None),
-                "session_updated_at": getattr(session, "updated_at", None) if session else None,
+                "user_id": user_id,
+                "login_sec_level": login_sec_level,
+                "session_updated_at": session_updated_at,
                 "has_cas_tgt": probe["has_cas_tgt"],
                 "credentials_configured": probe["credentials_configured"],
                 "pending_2fa": (
