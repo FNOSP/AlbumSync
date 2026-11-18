@@ -91,9 +91,9 @@ class TestPlatformRegistry(unittest.TestCase):
 
     def test_unknown_platform_rejected(self):
         with self.assertRaises(ValueError):
-            get_platform_spec("xiaomi")
+            get_platform_spec("bogus")
         with self.assertRaises(ValueError):
-            get_platform_spec(None if False else "bogus")
+            get_platform_spec("unknown-platform")
 
     def test_known_platforms_shape(self):
         items = known_platforms()
@@ -102,8 +102,8 @@ class TestPlatformRegistry(unittest.TestCase):
 
     def test_validate_account_platform_check(self):
         self.assertIsNone(validate_account(make_account()))
-        err = validate_account(make_account(platform="xiaomi"))
-        self.assertIsNotNone(err)  # 未注册平台拒绝
+        self.assertIsNone(validate_account(make_account(platform="xiaomi")))  # T27 已注册
+        self.assertIsNotNone(validate_account(make_account(platform="bogus")))
 
 
 if __name__ == "__main__":

@@ -242,6 +242,8 @@ class RequestHandler(GatewayMixin, BaseHTTPRequestHandler):
                 self.api_get(self.manager.status_snapshot)
             elif path == "/api/settings":
                 self.api_get(self.manager.get_settings, wrap_key="settings")
+            elif path == "/api/backup/list":
+                self.api_get(self.manager.list_backups)
             elif path == "/api/accounts":
                 self.api_get(self.manager.list_accounts, wrap_key="accounts")
             elif path == "/api/photos_dirs":
@@ -279,6 +281,12 @@ class RequestHandler(GatewayMixin, BaseHTTPRequestHandler):
                 self.api_post(mg.create_account, body)
             elif path == "/api/settings":
                 self.api_post(mg.save_settings, body)
+            elif path == "/api/backup/export":
+                self.api_post(mg.export_backup, body)
+            elif path == "/api/backup/inspect":
+                self.api_post(mg.inspect_backup, body)
+            elif path == "/api/backup/import":
+                self.api_post(mg.import_backup, body)
             elif path == "/api/photos_dirs/custom":
                 self.api_post(mg.add_custom_photos_dir, str(body.get("path") or ""))
             elif path.startswith("/api/accounts/"):

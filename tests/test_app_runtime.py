@@ -129,7 +129,7 @@ class TestAppConfig(unittest.TestCase):
 
     def test_defaults_on_missing(self):
         data = self.cfg.load()
-        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["version"], app_runtime.CONFIG_VERSION)
         self.assertEqual(data["settings"]["timezone"], "Asia/Shanghai")
         self.assertEqual(data["accounts"], [])
 
@@ -141,9 +141,12 @@ class TestAppConfig(unittest.TestCase):
         self.cfg.save({"timezone": "Asia/Shanghai", "log_level": "DEBUG",
                        "custom_photos_dirs": []}, [account])
         raw = json.loads((self.tmp / "config.json").read_text(encoding="utf-8"))
-        self.assertEqual(raw["version"], 2)
+        self.assertEqual(raw["version"], app_runtime.CONFIG_VERSION)
         self.assertIn("settings", raw)
         self.assertIn("accounts", raw)
+        # v3：磁盘不允许明文 password 字段
+        self.assertNotIn("password", raw["accounts"][0])
+        self.assertIn("password_enc", raw["accounts"][0])
         data = self.cfg.load()
         self.assertEqual(len(data["accounts"]), 1)
         acc = data["accounts"][0]
@@ -260,16 +263,17 @@ class TestMigration(unittest.TestCase):
 
         # 备份存在
         self.assertTrue((self.tmp / "config.json.bak-v1").exists())
-        # v2 结构 + 账号包装
+        # v3 结构 + 账号包装
         raw = json.loads((self.tmp / "config.json").read_text(encoding="utf-8"))
-        self.assertEqual(raw["version"], 2)
+        self.assertEqual(raw["version"], app_runtime.CONFIG_VERSION)
         self.assertEqual(len(raw["accounts"]), 1)
         acc = raw["accounts"][0]
         self.assertEqual(acc["id"], "acc-hw-0")
         self.assertEqual(acc["platform"], "huawei")
         self.assertTrue(acc["enabled"])
         self.assertEqual(acc["username"], "13800000000")
-        self.assertEqual(acc["password"], "secret")
+        self.assertNotIn("password", acc)  # v3 只写密文信封
+        self.assertIsNotNone(acc["password_enc"])
         self.assertEqual(acc["albums"], ["相机"])
         self.assertEqual(acc["photos_dir"], "")  # 空 → 运行时回退 photos/acc-hw-0
         # settings 拆分
@@ -287,10 +291,11 @@ class TestMigration(unittest.TestCase):
         self.assertTrue((self.tmp / "photos" / "acc-hw-0" / "sub" / "IMG_002.jpg").exists())
         self.assertFalse((self.tmp / "photos" / "IMG_001.jpg").exists())
 
-        # 运行时视图回退路径正确
+        # 运行时视图：回退路径正确 + 密码已解密
         data = AppConfig(self.tmp / "config.json", self.tmp).load()
         self.assertEqual(data["accounts"][0]["photos_dir"],
                          str(self.tmp / "photos" / "acc-hw-0"))
+        self.assertEqual(data["accounts"][0]["password"], "secret")
 
     def test_custom_photos_dir_not_moved(self):
         custom = self.tmp / "elsewhere"
@@ -409,20 +414,30 @@ class TestManagerBasics(ManagerTest):
         with self.assertRaises(KeyError):
             self.mgr.get_account("nope")
 
+    def _stored_password(self, account_id: str) -> str:
+        cfg = AppConfig(self.tmp / "config.json", self.tmp).load()
+        target = [a for a in cfg["accounts"] if a["id"] == account_id][0]
+        return target["password"]
+
     def test_password_mask_flow(self):
         acc = self._create()
         raw = json.loads((self.tmp / "config.json").read_text(encoding="utf-8"))
-        self.assertEqual(raw["accounts"][0]["password"], "pw-secret")
+        self.assertNotIn("password", raw["accounts"][0])
+        self.assertIn("password_enc", raw["accounts"][0])
+        self.assertNotIn("pw-secret", (self.tmp / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(self._stored_password(acc["id"]), "pw-secret")
         # 掩码回传保留原密码
         r = self.mgr.update_account(acc["id"], {"password": "******", "name": "改名"})
         self.assertEqual(r["status"], "ok")
         raw = json.loads((self.tmp / "config.json").read_text(encoding="utf-8"))
-        self.assertEqual(raw["accounts"][0]["password"], "pw-secret")
+        self.assertNotIn("password", raw["accounts"][0])
+        self.assertEqual(self._stored_password(acc["id"]), "pw-secret")
         self.assertEqual(raw["accounts"][0]["name"], "改名")
         # __clear__ 清除
         self.mgr.update_account(acc["id"], {"password": "__clear__"})
         raw = json.loads((self.tmp / "config.json").read_text(encoding="utf-8"))
-        self.assertEqual(raw["accounts"][0]["password"], "")
+        self.assertIsNone(raw["accounts"][0]["password_enc"])
+        self.assertEqual(self._stored_password(acc["id"]), "")
 
     def test_update_invalid_rejected(self):
         acc = self._create()

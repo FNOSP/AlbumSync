@@ -229,6 +229,54 @@ pre.logs{background:#141822;color:#d6e2f0;border-radius:8px;padding:12px;font-si
         <button class="btn" onclick="loadGlobal(true)">放弃修改</button>
       </div>
     </div>
+
+    <div class="card">
+      <h2>凭据备份 <span class="hint">整包口令加密（.asbak）；不兼容升级前务必导出一份</span></h2>
+      <div class="form-grid">
+        <div class="field full"><label>备份目录（绝对路径）</label>
+          <div class="cron-row"><input type="text" id="g-backup_dir" placeholder="留空 = 应用数据目录/backups">
+            <button class="btn" type="button" onclick="saveBackupDir()">保存目录</button></div>
+          <span class="tip" id="bk-dir-hint">留空时导出到应用数据目录下的 backups/</span></div>
+      </div>
+
+      <div class="section-title">导出凭据</div>
+      <div class="form-grid">
+        <div class="field"><label>加密口令（至少 8 位）</label>
+          <input type="password" id="bk-pass" autocomplete="new-password">
+          <span class="tip">口令只用于加密备份包；忘记口令将无法恢复</span></div>
+        <div class="field"><label>确认口令</label>
+          <input type="password" id="bk-pass2" autocomplete="new-password"></div>
+        <div class="field full"><label>包含内容</label>
+          <label style="font-weight:400;margin-right:18px"><input type="checkbox" id="bk-include-pass" checked style="vertical-align:-2px"> 账号密码</label>
+          <label style="font-weight:400"><input type="checkbox" id="bk-include-sessions" checked style="vertical-align:-2px"> 登录会话（导入后免重新登录）</label></div>
+      </div>
+      <div class="section-title">账号范围</div>
+      <div id="bk-accounts" class="tip">加载中…</div>
+      <div class="btn-row" style="margin-top:14px">
+        <button class="btn primary" onclick="exportBackup()">导出并下载</button>
+        <button class="btn" onclick="loadBackupPanel()">刷新</button>
+      </div>
+      <div id="bk-list" class="tip" style="margin-top:10px">备份列表加载中…</div>
+
+      <div class="section-title">导入凭据</div>
+      <div class="form-grid">
+        <div class="field"><label>备份文件（.asbak）</label>
+          <input type="file" id="bk-file" accept=".asbak,application/octet-stream">
+          <span class="tip">先解密预览，确认后再导入</span></div>
+        <div class="field"><label>导入口令</label>
+          <input type="password" id="bk-import-pass" autocomplete="new-password"></div>
+        <div class="field"><label>导入方式</label>
+          <select id="bk-mode">
+            <option value="merge">合并（同 id 覆盖）</option>
+            <option value="replace">替换（清空现有账号）</option>
+          </select></div>
+      </div>
+      <div class="btn-row" style="margin-top:14px">
+        <button class="btn" onclick="inspectBackup()">解密预览</button>
+        <button class="btn danger" onclick="importBackup()">确认导入</button>
+      </div>
+      <div id="bk-preview" class="tip" style="margin-top:10px"></div>
+    </div>
   </div>
 
   <!-- 状态总览 -->
@@ -263,7 +311,7 @@ pre.logs{background:#141822;color:#d6e2f0;border-radius:8px;padding:12px;font-si
   <!-- 同步设置 -->
   <div id="tab-settings" style="display:none">
     <div class="card">
-      <h2>账号与认证 <span class="hint">密码仅保存在 NAS 本地 config.json（chmod 600），提交后不再回显</span></h2>
+      <h2>账号与认证 <span class="hint">密码以密文保存在 NAS 本地（密钥文件 secret.key，均 chmod 600），提交后不再回显</span></h2>
       <div class="form-grid">
         <div class="field"><label>华为账号</label><input type="text" id="f-username" placeholder="手机号 / 邮箱">
           <span class="tip">也可不填账号，改用「认证与安全」页的 cURL 导入（免密码）</span></div>
@@ -517,7 +565,7 @@ function switchTab(name) {
   if (name === "status") { refreshStatus(); timers.status = setInterval(refreshStatus, 15000); }
   if (name === "accounts") loadAccounts();
   if (name === "overview") refreshOverview();
-  if (name === "global") loadGlobal();
+  if (name === "global") { loadGlobal(); loadBackupPanel(); }
   if (name === "settings") loadConfig();
   if (name === "albums") loadAlbums();
   if (name === "auth") { refreshAuth(); timers.auth = setInterval(refreshAuth, 10000); }
@@ -1567,6 +1615,125 @@ async function saveGlobal() {
     });
     toast(r.message || "全局设置已保存（全部账号热生效）", "ok");
   } catch (e) { toast("保存失败：" + e.message, "err"); }
+}
+
+/* ---------- 凭据备份（0.3.0） ---------- */
+async function loadBackupPanel() {
+  try {
+    const s = (await api("settings")).settings;
+    $("g-backup_dir").value = s.backup_dir || "";
+    const list = await api("backup/list");
+    $("bk-dir-hint").textContent = "当前备份目录：" + list.directory +
+      (s.backup_dir ? "" : "（默认，应用数据目录下）");
+    renderBackupFiles(list.files || []);
+    const d = await api("accounts");
+    const items = d.accounts || [];
+    $("bk-accounts").innerHTML = items.length
+      ? items.map(a => `<label style="display:block;font-weight:400;margin-bottom:4px">
+          <input type="checkbox" class="bk-acc" value="${esc(a.id)}" checked style="vertical-align:-2px">
+          ${esc(a.name)}（${esc(PLATFORM_LABELS[a.platform] || a.platform || "-")}）${a.username ? " · " + esc(a.username) : ""}</label>`).join("")
+      : "暂无可导出的账号";
+  } catch (e) { toast("加载备份信息失败：" + e.message, "err"); }
+}
+
+function renderBackupFiles(files) {
+  $("bk-list").innerHTML = files.length
+    ? "已有备份（新→旧）：<br>" + files.map(f => `<div class="chan-row">
+        <span class="pd-path">${esc(f.name)}</span>
+        <span class="hint" style="margin-left:auto">${(f.size / 1024).toFixed(1)} KB · ${esc(f.mtime)}</span></div>`).join("")
+    : "备份目录中暂无 .asbak 文件";
+}
+
+async function saveBackupDir() {
+  try {
+    const r = await api("settings", { method: "PUT", body: { backup_dir: $("g-backup_dir").value.trim() } });
+    toast(r.message || "备份目录已保存", "ok");
+    loadBackupPanel();
+  } catch (e) { toast("保存失败：" + e.message, "err"); }
+}
+
+function downloadB64(b64, filename) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function readBackupFileB64() {
+  const file = $("bk-file").files[0];
+  if (!file) throw new Error("请先选择备份文件");
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+async function exportBackup() {
+  const pass = $("bk-pass").value;
+  if (pass.length < 8) return toast("导出口令至少 8 个字符", "err");
+  if (pass !== $("bk-pass2").value) return toast("两次输入的口令不一致", "err");
+  const ids = [...document.querySelectorAll(".bk-acc:checked")].map(x => x.value);
+  if (!ids.length) return toast("请至少选择一个账号", "err");
+  const includePass = $("bk-include-pass").checked;
+  if (includePass && !window.confirm(
+    "备份包将包含账号密码（由口令加密保护）。请妥善保管口令与备份文件，泄露可能导致账号被他人登录。\n\n继续导出？")) return;
+  try {
+    const r = await api("backup/export", {
+      method: "POST",
+      body: {
+        passphrase: pass,
+        include_passwords: includePass,
+        include_sessions: $("bk-include-sessions").checked,
+        account_ids: ids,
+      },
+    });
+    downloadB64(r.data_b64, r.filename);
+    toast(r.message || "备份已导出", "ok");
+    $("bk-pass").value = ""; $("bk-pass2").value = "";
+    loadBackupPanel();
+  } catch (e) { toast("导出失败：" + e.message, "err"); }
+}
+
+async function inspectBackup() {
+  try {
+    const data_b64 = await readBackupFileB64();
+    const pass = $("bk-import-pass").value;
+    const r = await api("backup/inspect", { method: "POST", body: { data_b64, passphrase: pass } });
+    const h = r.header || {};
+    const flags = h.flags || {};
+    $("bk-preview").innerHTML =
+      `<div>schema ${esc(h.schema ?? "-")} · 应用版本 ${esc(h.app_version || "-")} · 创建于 ${esc(h.created_at || "-")} · ` +
+      `${flags.include_passwords ? "含密码" : "不含密码"} / ${flags.include_sessions ? "含会话" : "不含会话"}</div>` +
+      (r.accounts || []).map(a => `<div class="chan-row">
+        <span class="pd-path">${esc(a.name)}（${esc(a.id)}）</span>
+        <span class="hint" style="margin-left:auto">${a.has_password ? "含密码" : "无密码"} · ` +
+        `${a.sessions.length ? a.sessions.length + " 个会话文件" : "无会话"}` +
+        `${a.conflict ? " · 同 id 已存在（导入将覆盖）" : ""}</span></div>`).join("");
+    toast("备份包校验通过", "ok");
+  } catch (e) { $("bk-preview").innerHTML = ""; toast("校验失败：" + e.message, "err"); }
+}
+
+async function importBackup() {
+  const mode = $("bk-mode").value;
+  try {
+    const data_b64 = await readBackupFileB64();
+    const pass = $("bk-import-pass").value;
+    if (mode === "replace" && !window.confirm("替换模式会先清空当前全部账号，再导入备份中的账号。确定继续？")) return;
+    if (!window.confirm("确认导入？导入后相关账号将立即重建运行。")) return;
+    const r = await api("backup/import", { method: "POST", body: { data_b64, passphrase: pass, mode } });
+    toast(r.message || "导入完成", "ok");
+    $("bk-preview").innerHTML = "";
+    $("bk-file").value = "";
+    loadBackupPanel();
+    if (ui.mode === "overview") loadAccounts();
+  } catch (e) { toast("导入失败：" + e.message, "err"); }
 }
 
 /* ---------- 新建账号向导（凭据 → 存储调度 → 相册） ---------- */

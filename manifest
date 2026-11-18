@@ -1,7 +1,7 @@
 appname                    = AlbumSync
-version                    = 0.2.8
+version                    = 0.3.0
 display_name               = 相册同步
-desc                       = """多云相册备份到飞牛 NAS。支持多账号：同一平台可添加多个账号，各自独立管理相册选择、存储目录、调度与登录态，账号间完全隔离、互不干扰，配置保存按账号热生效。华为云空间支持两种登录：浏览器会话 cURL 导入（免密码）与账号密码登录（短信/邮箱二次验证码在网页提交，信任设备后静默重登）。小米云相册（i.mi.com）支持浏览器 cookie 导入（免密码，不支持自动重登）。同步能力：按相册/文件类型/时间范围过滤、增量下载、目录结构模板、删除镜像策略、并发与限速、cron 定时同步、dry-run 预览、Webhook 通知。内置 Web 管理界面（账号管理/状态总览/全局设置/单账号工作区）。引擎为上游开源项目 hwcloudpd，纯 Python 标准库实现、零第三方依赖。开源地址：https://github.com/tuber0613/hwcloudpd"""
+desc                       = """多云相册备份到飞牛 NAS。支持多账号：同一平台可添加多个账号，各自独立管理相册选择、存储目录、调度与登录态，账号间完全隔离、互不干扰，配置保存按账号热生效。华为云空间支持两种登录：浏览器会话 cURL 导入（免密码）与账号密码登录（短信/邮箱二次验证码在网页提交，信任设备后静默重登）。小米云相册（i.mi.com）支持浏览器 cookie 导入（免密码，不支持自动重登）。同步能力：按相册/文件类型/时间范围过滤、增量下载、目录结构模板、删除镜像策略、并发与限速、cron 定时同步、dry-run 预览、Webhook 通知。账号密码使用机器密钥加密落盘（config 仅存密文），并支持口令加密的凭据备份导出/导入（.asbak，可在全局设置中配置备份目录）。内置 Web 管理界面（账号管理/状态总览/全局设置/单账号工作区）。引擎为上游开源项目 hwcloudpd，纯 Python 标准库实现、零第三方依赖。开源地址：https://github.com/tuber0613/hwcloudpd"""
 platform                   = x86
 source                     = thirdparty
 maintainer                 = 油炸牛油果
@@ -17,6 +17,7 @@ checkport                  = true
 install_dep_apps           = python 3.11
 disable_authorization_path = true
 changelog                  = """
+- 0.3.0 凭据加密与备份：账号密码不再明文落盘——config 升级 v3，密码以 ChaCha20-Poly1305（RFC 8439，纯标准库实现）密文信封 password_enc 保存，密钥为应用数据目录下 secret.key（32 字节随机、chmod 600，AAD 绑定账号 id 防调换）；存量 v2 明文密码启动时自动原地加密（原配置备份 config.json.bak-pre-encrypt），密钥文件丢失时账号标记「凭据无法解密」并提示重新输入，不影响其他账号；新增凭据备份导出/导入（.asbak）：整包口令加密（scrypt KDF + ChaCha20-Poly1305，明文头仅含账号摘要用于预检），可选是否包含账号密码与登录会话、可选账号范围，导出同时落盘到备份目录（默认应用数据目录 backups/，可在「全局设置→凭据备份」修改为任意绝对路径）并提供浏览器下载；导入支持先解密预览（账号、冲突、会话、是否含密码）再合并（同 id 覆盖）或替换导入，会话文件随包恢复（导入后免重新登录）；全量新增 21 项凭据/备份单测（含 RFC 8439 官方向量）
 - 0.2.8 真机部署修复（小米 Provider 上线必备）：修复小米账号存在时应用启动即整体崩溃——SchedulerManager 构造账号运行时无条件调用 build_authenticator()，XiaomiAuthStrategy 缺该方法抛 AttributeError 导致主进程退出、全部账号停止；现补 build_authenticator() 返回不可自动重登的桩（can_attempt_login=False，daemon 仅使用已导入的 cookie 会话），并审计 app_runtime 全部 strategy 调用点；auth_status/cas_probe 改为 hasattr + getattr 防御，小米无 CAS 语义不再报错；小米 daemon 未导入会话时优雅降级（告警而非崩溃）；华为主号 2FA 信任设备验证通过后 loginSecLevel=2，自动重登静默且跨重启保持
 - 0.2.6 小米云相册 Provider：新增多平台支持——小米云相册（i.mi.com）完整接入 T25 Provider 抽象层，PhotoProvider 10 方法 + AuthStrategy 协议全部实现；纯 urllib 标准库零第三方依赖；登录仅支持 cookie 导入（import_session，密码直登风控必触发短信验证码不可靠）；三跳下载链路（gallery/storage → kss_web/rd JSONP 解析 → download_file POST form meta）真机全链路验证通过（WSL python3 纯标准库复现 1,169,524 字节原图，JPEG 魔数 ffd8ffe1）；平台注册表 PLATFORMS["xiaomi"] 登记，capabilities 声明 delete/burst/live_photo/favorites/web_login_2fa 均 False；前端新建账号向导启用小米平台卡（动态显隐账号密码字段）；后端 account manager 已正确处理 platform 字段（零改动）；临时脚本/测试 cookie 未落盘项目目录；修复两个实测坑：① galleries API 列表字段名是 galleries 不是 photos（迭代逻辑一直拿空）；② serviceToken 会被小米静默轮替，探活失败即 AuthExpiredError 提示重导入
 - 0.2.5 多 NAS 用户隔离（实验）：fnOS 网关登录身份识别——管理员可见全部账号，普通用户仅见归属自己的账号（服务端 API 强制过滤，越权访问一律 404 不泄露存在性；普通用户创建账号强制归属本人且不可变更归属）；直连端口视为本机管理（全部可见）；开启 disable_authorization_path（与官方相册应用一致），任意登录 fnOS 用户可打开应用并按身份隔离；新增 GET /api/me 身份端点与 GET /api/debug/headers 诊断端点；存量账号自动归管理员可见（owner 兼容迁移）

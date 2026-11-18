@@ -23,6 +23,7 @@ prompt_fn/output_fn 注入) 配合 patches/0001、0002（非交互自动发码�
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -56,18 +57,23 @@ from hwcloudpd.sync import SyncEngine
 from providers import get_platform_spec
 from providers.base import ProviderCapabilities
 
+import backup as backup_pkg
+import crypto_box
+
 logger = logging.getLogger("albumsync.runtime")
 
 APP_NAME = "AlbumSync"
 APP_VERSION = os.environ.get("TRIM_APPVER") or "0.1.0"
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 
 # ---------- 全局设置（与账号无关） ----------
 DEFAULT_SETTINGS: dict[str, Any] = {
     "timezone": "Asia/Shanghai",
     "custom_photos_dirs": [],  # 手动登记的可选目录清单（探测可写才入库）
     "log_level": "INFO",
+    # 凭据备份包默认导出目录；空 = <pkgvar>/backups（0.3.0）
+    "backup_dir": "",
 }
 
 # ---------- 账号字段（每账号一份） ----------
@@ -113,6 +119,8 @@ DEFAULT_ACCOUNT: dict[str, Any] = {
     "webhook_url": None,
     "telegram_chat_id": None,
     "notification_script": None,
+    # 密码密文信封（0.3.0 起落盘唯一形式）；password 仅存在于运行时内存视图
+    "password_enc": None,
 }
 
 _ACCOUNT_BOOL_KEYS = (
@@ -237,6 +245,16 @@ def validate_settings(data: dict[str, Any]) -> str | None:
             if vs not in cleaned:
                 cleaned.append(vs)
         data["custom_photos_dirs"] = cleaned
+
+    # 凭据备份目录：空 = <pkgvar>/backups；非空必须是绝对路径
+    backup_dir = data.get("backup_dir")
+    if backup_dir not in (None, ""):
+        if not isinstance(backup_dir, str):
+            return "backup_dir 必须为字符串"
+        bd = os.path.normpath(backup_dir.strip())
+        if not os.path.isabs(bd):
+            return f"backup_dir 必须为绝对路径: {backup_dir}"
+        data["backup_dir"] = bd
 
     return None
 
@@ -381,8 +399,8 @@ def migrate_config_v1_to_v2(pkgvar: Path) -> None:
     except Exception:
         logger.warning("config.json 读取失败，跳过迁移（交由 AppConfig 容错）: %s", path)
         return
-    if not isinstance(raw, dict) or not raw or raw.get("version") == CONFIG_VERSION:
-        return  # v2 或空配置
+    if not isinstance(raw, dict) or not raw or raw.get("version") in (2, 3):
+        return  # v2/v3 或空配置
 
     backup = path.with_name("config.json.bak-v1")
     moved: list[tuple[Path, Path]] = []  # (迁移后位置, 原位置)
@@ -439,15 +457,40 @@ def migrate_config_v1_to_v2(pkgvar: Path) -> None:
 
 
 class AppConfig:
-    """config.json（v2）读写 + SyncConfig 映射。
+    """config.json（v3）读写 + SyncConfig 映射。
 
-    load() 返回补齐默认值与 photos_dir 回退后的「运行时视图」；
-    save() 仅持久化已知字段并把等于默认回退值的 photos_dir 归一为空串。
+    load() 返回补齐默认值与 photos_dir 回退后的「运行时视图」——账号密码已解密为
+    明文只存在于内存，便于构造 SyncConfig；save() 只写密文信封 password_enc，
+    磁盘上不再出现任何明文密码。
     """
+
+    #: 密码信封 AAD 前缀，绑定账号 id（防止跨账号调换密文）
+    _PASSWORD_AAD = "albumsync:password:"
 
     def __init__(self, path: Path, pkgvar: Path) -> None:
         self.path = Path(path)
         self.pkgvar = Path(pkgvar)
+        self.key_path = self.pkgvar / "secret.key"
+        self._key: bytes | None = None
+
+    # ---- 密钥 ----
+
+    def secret_key(self) -> bytes:
+        if self._key is None:
+            self._key = crypto_box.load_or_create_key(self.key_path)
+        return self._key
+
+    def encrypt_password(self, account_id: str, password: str) -> dict[str, Any] | None:
+        if not password:
+            return None
+        return crypto_box.seal_text(
+            self.secret_key(), password, aad=f"{self._PASSWORD_AAD}{account_id}"
+        )
+
+    def decrypt_password(self, account_id: str, envelope: Any) -> str:
+        if not envelope:
+            return ""
+        return crypto_box.open_text(self.secret_key(), envelope)
 
     # ---- 读取 ----
 
@@ -475,12 +518,25 @@ class AppConfig:
         account = self._merge(dict(DEFAULT_ACCOUNT), account)
         if not str(account.get("photos_dir") or "").strip():
             account["photos_dir"] = self.default_photos_dir(account["id"])
+        acc_id = str(account.get("id") or "")
+        envelope = account.get("password_enc")
+        if envelope:
+            try:
+                account["password"] = self.decrypt_password(acc_id, envelope)
+            except crypto_box.CryptoError as exc:
+                logger.warning("账号 %s 密码解密失败：%s", acc_id, exc)
+                account["password"] = ""
+                account["password_error"] = "凭据无法解密，请重新输入密码或导入备份"
         return account
+
+    def normalize_account(self, account: dict[str, Any]) -> dict[str, Any]:
+        """把外部来源（备份包）的账号字段补齐为标准运行时结构。"""
+        return self._fill_account(dict(account or {}))
 
     def load(self) -> dict[str, Any]:
         """运行时视图：{"version", "settings", "accounts"}（默认值已补齐）。"""
         raw = self.load_raw()
-        if raw.get("version") == CONFIG_VERSION:
+        if raw.get("version") in (2, 3):
             settings = self._merge(dict(DEFAULT_SETTINGS), raw.get("settings") or {})
             accounts_raw = raw.get("accounts")
             if not isinstance(accounts_raw, list):
@@ -503,13 +559,18 @@ class AppConfig:
     # ---- 写入 ----
 
     def save(self, settings: dict[str, Any], accounts: list[dict[str, Any]]) -> None:
-        """持久化 v2 配置（原子写 + chmod 600）。photos_dir 等于默认回退值时归一为空串。"""
+        """持久化 v3 配置（原子写 + chmod 600）；密码加密为 password_enc。"""
         clean_settings = {k: settings.get(k, DEFAULT_SETTINGS[k]) for k in DEFAULT_SETTINGS}
         clean_accounts: list[dict[str, Any]] = []
         for account in accounts:
             acc = {k: account.get(k, DEFAULT_ACCOUNT[k]) for k in DEFAULT_ACCOUNT}
             if acc["photos_dir"] == self.default_photos_dir(acc["id"]):
                 acc["photos_dir"] = ""
+            password = str(account.get("password") or "")
+            acc_id = str(acc.get("id") or "")
+            acc["password_enc"] = self.encrypt_password(acc_id, password)
+            acc.pop("password", None)  # 磁盘上不允许出现明文
+            acc.pop("password_error", None)
             clean_accounts.append(acc)
         payload = {
             "version": CONFIG_VERSION,
@@ -526,6 +587,31 @@ class AppConfig:
             os.chmod(self.path, 0o600)  # 含账号密码，限制访问
         except OSError:
             pass
+
+    def migrate_encrypt_passwords(self) -> int:
+        """v2 明文密码 → v3 密文信封（幂等）。返回本次迁移的账号数。"""
+        raw = self.load_raw()
+        if raw.get("version") not in (2, 3):
+            return 0
+        accounts_raw = raw.get("accounts")
+        if not isinstance(accounts_raw, list):
+            return 0
+        plain = [a for a in accounts_raw
+                 if isinstance(a, dict) and str(a.get("password") or "")]
+        if not plain:
+            return 0
+        backup_path = self.path.with_name("config.json.bak-pre-encrypt")
+        try:
+            shutil.copy2(self.path, backup_path)
+            os.chmod(backup_path, 0o600)
+        except OSError as exc:
+            logger.warning("明文密码迁移：备份 config.json 失败（继续执行）: %s", exc)
+        cfg = self.load()
+        self.save(cfg["settings"], cfg["accounts"])
+        logger.info(
+            "明文密码已加密落盘：%d 个账号（原配置备份 %s）", len(plain), backup_path.name
+        )
+        return len(plain)
 
     # ---- SyncConfig 映射 ----
 

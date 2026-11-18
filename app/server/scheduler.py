@@ -12,9 +12,12 @@
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 from logging.handlers import RotatingFileHandler
@@ -36,6 +39,7 @@ from app_runtime import (
     validate_account,
     validate_settings,
 )
+import backup as backup_pkg
 from identity import Requestor, current_requestor
 
 logger = logging.getLogger("albumsync.scheduler")
@@ -53,6 +57,11 @@ class SchedulerManager:
         migrate_config_v1_to_v2(self.pkgvar)
 
         self.app_config = AppConfig(self.pkgvar / "config.json", self.pkgvar)
+        # v2 明文密码 → v3 密文信封（幂等；失败不阻塞启动，仅告警）
+        try:
+            self.app_config.migrate_encrypt_passwords()
+        except Exception:
+            logger.exception("明文密码加密迁移失败（配置保持原样）")
         self.started_at = time.time()
         self.sync_gate = threading.Lock()  # 全局串行闸门（跨账号同步排队）
         self._lock = threading.RLock()
@@ -566,6 +575,233 @@ class SchedulerManager:
             logger.info("custom photos dir added: %s", p)
             return {"status": "ok", "message": "已添加到可选目录",
                     "custom_photos_dirs": customs}
+
+    # ---------- 凭据备份（0.3.0） ----------
+
+    def _backup_dir(self, settings: dict[str, Any]) -> Path:
+        raw = str(settings.get("backup_dir") or "").strip()
+        return Path(raw) if raw else (self.pkgvar / "backups")
+
+    def list_backups(self) -> dict[str, Any]:
+        """列出备份目录中的 .asbak 文件（新→旧，最多 50 条）。"""
+        directory = self._backup_dir(self._load_cfg()["settings"])
+        items: list[dict[str, Any]] = []
+        if directory.is_dir():
+            try:
+                entries = sorted(directory.glob("*.asbak"), reverse=True)
+            except OSError:
+                entries = []
+            for entry in entries[:50]:
+                try:
+                    st = entry.stat()
+                except OSError:
+                    continue
+                items.append({
+                    "name": entry.name,
+                    "size": st.st_size,
+                    "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
+                })
+        return {"directory": str(directory), "files": items}
+
+    def export_backup(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """导出凭据备份：整包口令加密 → 落盘到备份目录 + 返回 base64 供浏览器下载。"""
+        passphrase = str(payload.get("passphrase") or "")
+        if len(passphrase) < 8:
+            return {"status": "error", "message": "导出口令至少 8 个字符"}
+        include_passwords = bool(payload.get("include_passwords", True))
+        include_sessions = bool(payload.get("include_sessions", True))
+        raw_ids = payload.get("account_ids")
+        if isinstance(raw_ids, str):
+            raw_ids = [raw_ids]
+        wanted = {str(x) for x in raw_ids} if raw_ids else None
+
+        with self._lock:
+            cfg = self._load_cfg()
+            visible = {a["id"] for a in self._visible_accounts(cfg)}
+            accounts = [a for a in cfg["accounts"] if a["id"] in visible]
+            if wanted is not None:
+                accounts = [a for a in accounts if a["id"] in wanted]
+            try:
+                archive, manifest = backup_pkg.build_archive(
+                    pkgvar=self.pkgvar, settings=cfg["settings"], accounts=accounts,
+                    app_version=APP_VERSION, include_passwords=include_passwords,
+                    include_sessions=include_sessions,
+                )
+                blob = backup_pkg.seal_container(archive, passphrase, manifest)
+            except backup_pkg.BackupError as exc:
+                return {"status": "error", "message": str(exc)}
+
+            directory = self._backup_dir(cfg["settings"])
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                os.chmod(directory, 0o700)
+            except OSError as exc:
+                return {"status": "error", "message": f"备份目录不可用: {directory}（{exc}）"}
+
+            name = f"albumsync-backup-{time.strftime('%Y%m%d-%H%M%S')}.asbak"
+            path = directory / name
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(blob)
+            except OSError as exc:
+                return {"status": "error", "message": f"写入备份文件失败: {exc}"}
+
+        logger.info(
+            "credentials export ok: accounts=%d include_passwords=%s include_sessions=%s file=%s",
+            len(accounts), include_passwords, include_sessions, path,
+        )
+        return {
+            "status": "ok",
+            "message": f"备份已导出到 {path}",
+            "file": str(path),
+            "filename": name,
+            "size": len(blob),
+            "data_b64": base64.b64encode(blob).decode("ascii"),
+            "accounts": manifest["accounts"],
+        }
+
+    def inspect_backup(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """解密校验并预览备份包内容（不写盘）。"""
+        blob = self._decode_backup_blob(payload)
+        if isinstance(blob, dict):
+            return blob
+        try:
+            header, archive = backup_pkg.open_container(blob, str(payload.get("passphrase") or ""))
+            files = backup_pkg.parse_archive(archive)
+            imported_cfg = backup_pkg.load_config_from_archive(files)
+            secrets_map = backup_pkg.load_secrets_from_archive(files)
+        except backup_pkg.BackupError as exc:
+            return {"status": "error", "message": str(exc)}
+        existing = {a["id"] for a in self._load_cfg()["accounts"]}
+        accounts = []
+        for acc in imported_cfg["accounts"]:
+            if not isinstance(acc, dict):
+                continue
+            acc_id = str(acc.get("id") or "")
+            accounts.append({
+                "id": acc_id,
+                "platform": acc.get("platform") or "huawei",
+                "name": acc.get("name") or acc_id,
+                "username": acc.get("username") or "",
+                "conflict": acc_id in existing,
+                "has_password": bool(secrets_map.get(acc_id)),
+                "sessions": sorted(backup_pkg.collect_session_files(files, acc_id).keys()),
+            })
+        return {
+            "status": "ok",
+            "header": {k: header.get(k) for k in
+                       ("schema", "app_version", "created_at", "flags") if k in header},
+            "accounts": accounts,
+        }
+
+    def import_backup(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """导入备份包：merge（默认，按 id 覆盖）或 replace（清空后导入）。"""
+        blob = self._decode_backup_blob(payload)
+        if isinstance(blob, dict):
+            return blob
+        mode = str(payload.get("mode") or "merge")
+        if mode not in ("merge", "replace"):
+            return {"status": "error", "message": "mode 仅支持 merge / replace"}
+        try:
+            _header, archive = backup_pkg.open_container(blob, str(payload.get("passphrase") or ""))
+            files = backup_pkg.parse_archive(archive)
+            imported_cfg = backup_pkg.load_config_from_archive(files)
+            secrets_map = backup_pkg.load_secrets_from_archive(files)
+        except backup_pkg.BackupError as exc:
+            return {"status": "error", "message": str(exc)}
+
+        requestor = current_requestor()
+        restored: list[str] = []
+        with self._lock:
+            cfg = self._load_cfg()
+            incoming: list[dict[str, Any]] = []
+            for raw_acc in imported_cfg["accounts"]:
+                if not isinstance(raw_acc, dict):
+                    continue
+                acc_id = str(raw_acc.get("id") or "").strip()
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", acc_id):
+                    return {"status": "error", "message": f"备份包含非法账号 id: {acc_id!r}"}
+                merged = {k: v for k, v in raw_acc.items() if k in DEFAULT_ACCOUNT}
+                merged["id"] = acc_id
+                merged["password"] = str(secrets_map.get(acc_id) or "")
+                merged["password_enc"] = None
+                account = self.app_config.normalize_account(merged)
+                if not requestor.sees_all:
+                    account["owner"] = requestor.user_id
+                error = validate_account(account, tz=cfg["settings"].get("timezone"))
+                if error:
+                    return {"status": "error", "message": f"账号 {acc_id} 配置非法: {error}"}
+                incoming.append(account)
+
+            if not incoming:
+                return {"status": "error", "message": "备份包中没有可导入的账号"}
+
+            if mode == "replace":
+                final = incoming
+            else:
+                by_id = {a["id"]: a for a in cfg["accounts"]}
+                for account in incoming:
+                    by_id[account["id"]] = account
+                final = list(by_id.values())
+
+            # 会话文件先落盘，再写配置，最后整体热重载
+            for account in incoming:
+                self._restore_session_files(files, account["id"])
+            cfg["accounts"] = final
+            try:
+                self._persist(cfg)
+            except Exception as exc:
+                return {"status": "error", "message": f"写入配置失败: {exc}"}
+            try:
+                self._reload_all()
+            except Exception as exc:
+                logger.exception("导入后热重载失败")
+                return {"status": "error", "message": f"配置已写入但热重载失败: {exc}"}
+            restored = [a["id"] for a in incoming]
+
+        logger.info("credentials import ok: mode=%s accounts=%s", mode, ",".join(restored))
+        return {
+            "status": "ok",
+            "message": f"已导入 {len(restored)} 个账号（{mode}）",
+            "mode": mode,
+            "accounts": restored,
+        }
+
+    def _restore_session_files(self, files: dict[str, bytes], account_id: str) -> None:
+        sessions = backup_pkg.collect_session_files(files, account_id)
+        if not sessions:
+            return
+        acc_dir = self.pkgvar / "accounts" / account_id
+        acc_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(acc_dir, 0o700)
+        except OSError:
+            pass
+        for name, data in sessions.items():
+            target = acc_dir / name
+            try:
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(data)
+            except OSError as exc:
+                logger.warning("恢复会话文件失败 %s: %s", target, exc)
+
+    @staticmethod
+    def _decode_backup_blob(payload: dict[str, Any]) -> bytes | dict[str, Any]:
+        raw = payload.get("data_b64")
+        if not isinstance(raw, str) or not raw.strip():
+            return {"status": "error", "message": "缺少备份文件内容（data_b64）"}
+        data = raw.strip()
+        if data.startswith("data:"):
+            data = data.split(",", 1)[-1]
+        try:
+            blob = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError):
+            return {"status": "error", "message": "备份文件内容不是有效的 base64"}
+        if len(blob) > backup_pkg.MAX_CONTAINER_BYTES:
+            return {"status": "error", "message": "备份包过大（超过 16MB）"}
+        return blob
 
     # ---------- 生命周期 ----------
 
