@@ -136,6 +136,10 @@ pre.logs{background:#141822;color:#d6e2f0;border-radius:8px;padding:12px;font-si
 #overlay{position:fixed;inset:0;background:rgba(20,24,34,.45);z-index:900;display:none;
   align-items:center;justify-content:center}
 #overlay.show{display:flex}
+/* 第二层弹窗：目录/定时选择器浮在向导之上（向导 DOM 保持存活） */
+#overlay2{position:fixed;inset:0;background:rgba(20,24,34,.45);z-index:950;display:none;
+  align-items:center;justify-content:center}
+#overlay2.show{display:flex}
 .modal{background:#fff;border-radius:12px;padding:22px;max-width:520px;width:92vw;box-shadow:0 10px 40px rgba(0,0,0,.3);max-height:calc(100vh - 56px);overflow-y:auto}
 .modal h3{font-size:16px;margin-bottom:12px}
 .modal .actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
@@ -147,6 +151,20 @@ pre.logs{background:#141822;color:#d6e2f0;border-radius:8px;padding:12px;font-si
 .spin{display:inline-block;width:14px;height:14px;border:2px solid #cbd3e0;border-top-color:var(--accent);
   border-radius:50%;animation:rot .8s linear infinite;vertical-align:-2px}
 @keyframes rot{to{transform:rotate(360deg)}}
+.acct-card{display:flex;align-items:flex-start;gap:14px;padding:14px;border:1px solid var(--border);
+  border-radius:var(--radius);margin-bottom:10px;background:#fff}
+.acct-card.disabled{opacity:.62;background:#fafbfc}
+.acct-main{flex:1;min-width:0}
+.acct-title{display:flex;align-items:center;gap:8px;font-weight:600;font-size:14.5px;flex-wrap:wrap}
+.acct-sub{color:var(--muted);font-size:12px;margin-top:3px;word-break:break-all}
+.acct-actions{display:flex;flex-direction:column;gap:6px;align-items:flex-end;flex:none}
+.plat-chip{display:inline-flex;align-items:center;gap:4px;background:#eef3fb;color:var(--accent);
+  border-radius:5px;padding:1px 8px;font-size:11.5px;font-weight:500}
+.ov-table td,.ov-table th{padding:9px 10px}
+.wiz-steps{display:flex;gap:6px;margin-bottom:14px}
+.wiz-step{flex:1;text-align:center;font-size:12px;color:var(--muted);padding:6px 0;border-bottom:2px solid var(--border)}
+.wiz-step.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+.wiz-step.done{color:var(--green);border-bottom-color:var(--green)}
 </style>
 </head>
 <body>
@@ -155,18 +173,63 @@ pre.logs{background:#141822;color:#d6e2f0;border-radius:8px;padding:12px;font-si
     <img src="./images/icon_64.png" alt="logo" onerror="this.style.display='none'">
     <div>
       <h1>相册同步</h1>
-      <span class="ver">华为云空间相册备份 · v<span id="ver">-</span> · <span class="uptime" id="uptime"></span></span>
+      <span class="ver">多云相册备份 · v<span id="ver">-</span> · <span class="uptime" id="uptime"></span></span>
     </div>
-    <div style="margin-left:auto"><span id="auth-badge" class="badge err">加载中</span></div>
+    <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+      <span id="cur-account" style="display:none;font-size:13px">
+        <a href="javascript:void(0)" onclick="backToAccounts()">← 账号列表</a>
+        <b id="cur-account-name" style="margin-left:6px"></b>
+      </span>
+      <span id="me-badge" class="badge" style="display:none"></span>
+      <span id="auth-badge" class="badge err">加载中</span>
+    </div>
   </header>
 
-  <nav id="tabs">
-    <button data-tab="status" class="active">状态总览</button>
-    <button data-tab="settings">同步设置</button>
-    <button data-tab="albums">相册选择</button>
-    <button data-tab="auth">认证与安全</button>
-    <button data-tab="logs">日志</button>
-  </nav>
+  <nav id="tabs"></nav>
+
+  <!-- 账号管理 -->
+  <div id="tab-accounts" style="display:none">
+    <div class="card">
+      <h2>账号 <span class="hint" id="accounts-owner-hint">同一平台可添加多个账号，各自独立同步、互不干扰</span>
+        <button class="btn primary" style="margin-left:auto" onclick="openAccountWizard()">＋ 新建账号</button>
+      </h2>
+      <div id="account-list"><div class="empty">加载中…</div></div>
+    </div>
+  </div>
+
+  <!-- 状态总览（聚合） -->
+  <div id="tab-overview" style="display:none">
+    <div id="overview-banner"></div>
+    <div class="card">
+      <h2>全部账号 <span class="hint" id="overview-hint"></span>
+        <button class="btn" style="margin-left:auto" onclick="refreshOverview()">刷新</button>
+      </h2>
+      <div id="overview-table"><div class="empty">加载中…</div></div>
+    </div>
+    <div class="card">
+      <h2>服务信息</h2>
+      <div id="overview-kv" class="kv"></div>
+    </div>
+  </div>
+
+  <!-- 全局设置 -->
+  <div id="tab-global" style="display:none">
+    <div class="card">
+      <h2>全局设置 <span class="hint">与账号无关；保存后全部账号热生效</span></h2>
+      <div class="form-grid">
+        <div class="field"><label>时区</label><input type="text" id="g-timezone" placeholder="Asia/Shanghai">
+          <span class="tip">日期过滤、cron 调度按此时区解释</span></div>
+        <div class="field"><label>日志级别（服务级）</label><select id="g-log_level">
+          <option>DEBUG</option><option selected>INFO</option><option>WARNING</option><option>ERROR</option></select></div>
+      </div>
+      <div class="section-title">手动登记的可选目录</div>
+      <div id="g-custom-dirs" class="tip">加载中…</div>
+      <div class="btn-row" style="margin-top:14px">
+        <button class="btn primary" onclick="saveGlobal()">保存全局设置（热生效）</button>
+        <button class="btn" onclick="loadGlobal(true)">放弃修改</button>
+      </div>
+    </div>
+  </div>
 
   <!-- 状态总览 -->
   <div id="tab-status">
@@ -211,12 +274,12 @@ pre.logs{background:#141822;color:#d6e2f0;border-radius:8px;padding:12px;font-si
     <div class="card">
       <h2>存储与目录</h2>
       <div class="form-grid">
-        <div class="field full"><label>照片存储目录（绝对路径）</label><div class="cron-row"><input type="text" id="f-photos_dir" placeholder="/vol1/1000/photos" oninput="probePhotosDir(this.value)"><button class="btn" type="button" onclick="openPhotosDirPicker()">可选目录…</button></div>
+        <div class="field full"><label>照片存储目录（绝对路径）</label><div class="cron-row"><input type="text" id="f-photos_dir" placeholder="/vol1/1000/photos" oninput="probePhotosDir(this.value); checkSharedPhotosDir(curId(), this.value, 'pd-shared')"><button class="btn" type="button" onclick="openPhotosDirPicker()">可选目录…</button></div>
           <span class="tip" id="pd-probe"></span>
+          <div id="pd-shared" style="margin-top:4px"></div>
           <span class="tip">需为 NAS 上已存在的目录绝对路径（fnOS 不会自动创建共享目录）。推荐先在 fnOS 文件管理器创建共享目录并确认应用有写权限，再填其路径（如 /vol1/1000/photo）；留空则用应用数据目录下 photos/</span></div>
         <div class="field"><label>目录结构模板</label><input type="text" id="f-folder_structure" placeholder="{:%Y/%m/%d}">
           <span class="tip">Python strftime 格式，例如 {:%Y/%m/%d} 或 {album}</span></div>
-        <div class="field"><label>时区</label><input type="text" id="f-timezone" placeholder="Asia/Shanghai"></div>
       </div>
     </div>
     <div class="card">
@@ -279,14 +342,11 @@ pre.logs{background:#141822;color:#d6e2f0;border-radius:8px;padding:12px;font-si
       </div>
     </div>
     <div class="card">
-      <h2>其他</h2>
-      <div class="form-grid">
-        <div class="field"><label>日志级别</label><select id="f-log_level">
-          <option>DEBUG</option><option selected>INFO</option><option>WARNING</option><option>ERROR</option></select></div>
-      </div>
-      <div class="btn-row" style="margin-top:14px">
+      <h2>保存 <span class="hint">保存后按账号热生效，不影响其他账号</span></h2>
+      <div class="btn-row">
         <button class="btn primary" id="btn-save-config" onclick="saveConfig()">保存配置（热生效）</button>
         <button class="btn" onclick="loadConfig(true)">放弃修改</button>
+        <span class="tip" style="align-self:center">时区、服务日志级别已移至「全局设置」</span>
       </div>
     </div>
   </div>
@@ -361,6 +421,7 @@ pre.logs{background:#141822;color:#d6e2f0;border-radius:8px;padding:12px;font-si
 
 <div id="toast-box"></div>
 <div id="overlay"><div class="modal" id="modal-body"></div></div>
+<div id="overlay2"><div class="modal" id="modal2-body"></div></div>
 
 <script>
 "use strict";
@@ -390,6 +451,7 @@ function modalConfirm(title, html, onOk, okText = "确认") {
   $("overlay").classList.add("show");
 }
 function closeModal() { $("overlay").classList.remove("show"); }
+function closeModal2() { $("overlay2").classList.remove("show"); }  // 只关第二层（picker），不影响下层向导/表单
 function modalOk() { closeModal(); const f = window._modalOk; window._modalOk = null; if (f) f(); }
 
 async function api(path, opts = {}) {
@@ -406,21 +468,56 @@ async function api(path, opts = {}) {
   return data;
 }
 
-/* ---------- 标签页 ---------- */
-let currentTab = "status";
+/* ---------- 导航（总览模式 / 账号工作区模式） ---------- */
+const PLATFORM_LABELS = { huawei: "华为云空间" };
+const OVERVIEW_TABS = [["accounts", "账号管理"], ["overview", "状态总览"], ["global", "全局设置"]];
+const ACCOUNT_TABS = [["status", "同步状态"], ["settings", "同步设置"], ["albums", "相册选择"], ["auth", "认证与安全"], ["logs", "日志"]];
+const ui = { mode: "overview", tab: "accounts", current: null }; // current：当前账号 {id,name}
 const timers = {};
-document.querySelectorAll("#tabs button").forEach(btn => {
-  btn.onclick = () => switchTab(btn.dataset.tab);
-});
+
+function curId() { return ui.current ? ui.current.id : null; }
+
+function setAuthBadge(ok, text, cls) {
+  const b = $("auth-badge");
+  b.className = "badge " + (cls || (ok ? "ok" : "err"));
+  b.textContent = text;
+}
+
+function buildNav() {
+  const tabs = ui.mode === "overview" ? OVERVIEW_TABS : ACCOUNT_TABS;
+  $("tabs").innerHTML = tabs.map(([t, label]) =>
+    `<button data-tab="${t}" class="${t === ui.tab ? "active" : ""}">${label}</button>`).join("");
+  document.querySelectorAll("#tabs button").forEach(btn => { btn.onclick = () => switchTab(btn.dataset.tab); });
+  const cur = $("cur-account");
+  if (ui.mode === "account" && ui.current) {
+    cur.style.display = "";
+    $("cur-account-name").textContent = ui.current.name || ui.current.id;
+  } else cur.style.display = "none";
+}
+
+function openAccount(item, tab) {
+  ui.mode = "account"; ui.current = { id: item.id, name: item.name };
+  window._albumsCache = []; window._excludeCache = []; albumAllModeUI = null;
+  buildNav(); switchTab(tab || "status");
+}
+function backToAccounts() {
+  ui.mode = "overview"; ui.current = null;
+  buildNav(); switchTab("accounts");
+}
+
 function switchTab(name) {
-  currentTab = name;
+  ui.tab = name;
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
-  for (const t of ["status", "settings", "albums", "auth", "logs"]) {
-    $("tab-" + t).style.display = t === name ? "" : "none";
+  for (const t of ["accounts", "overview", "global", "status", "settings", "albums", "auth", "logs"]) {
+    const el = $("tab-" + t);
+    if (el) el.style.display = t === name ? "" : "none";
   }
   Object.values(timers).forEach(clearInterval);
   for (const k of Object.keys(timers)) delete timers[k];
   if (name === "status") { refreshStatus(); timers.status = setInterval(refreshStatus, 15000); }
+  if (name === "accounts") loadAccounts();
+  if (name === "overview") refreshOverview();
+  if (name === "global") loadGlobal();
   if (name === "settings") loadConfig();
   if (name === "albums") loadAlbums();
   if (name === "auth") { refreshAuth(); timers.auth = setInterval(refreshAuth, 10000); }
@@ -442,34 +539,42 @@ function fmtTs(ts) {
 }
 
 async function refreshStatus() {
+  const id = curId();
+  if (!id) return;
   let s;
-  try { s = await api("status"); } catch (e) {
+  try { s = (await api(`accounts/${id}/status`)).status; } catch (e) {
     $("auth-summary").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return;
   }
-  $("ver").textContent = s.version || "-";
-  $("uptime").textContent = s.uptime_sec != null ? `已运行 ${Math.floor(s.uptime_sec / 60)} 分钟` : "";
 
   const badge = $("auth-badge");
-  badge.className = "badge " + (s.auth_valid ? "ok" : "err");
-  badge.textContent = s.auth_valid ? "登录态有效" : "登录态失效";
+  if (!s.enabled) setAuthBadge(false, "账号已停用", "off");
+  else if (s.ok && s.auth_valid) setAuthBadge(true, "登录态有效");
+  else if (s.ok) setAuthBadge(false, "登录态失效");
+  else setAuthBadge(false, s.last_error ? "账号异常" : "同步异常");
 
   const banner = $("status-banner");
-  if (!s.daemon_running) banner.innerHTML = `<div class="banner err">同步守护进程未运行——请尝试重启应用，或查看日志页排查。</div>`;
+  if (!s.enabled) banner.innerHTML = `<div class="banner warn">该账号已停用——回到账号列表可重新启用。</div>`;
+  else if (!s.daemon_running) banner.innerHTML = `<div class="banner err">同步守护进程未运行——请尝试重启应用，或查看日志页排查。</div>`;
   else if (s.last_error) banner.innerHTML = `<div class="banner warn">最近错误：${esc(s.last_error)}</div>`;
   else banner.innerHTML = "";
 
   const a = s.auth || {};
   $("auth-summary").innerHTML =
     `<div class="kv">
+      <span class="k">同步状态</span><span>${s.enabled ? (s.ok ? '<span class="badge ok">正常</span>' : '<span class="badge err">异常</span>') : '<span class="badge off">已停用</span>'}</span>
+      <span class="k">登录态</span><span>${s.auth_valid ? '<span class="badge ok">有效</span>' : '<span class="badge err">失效</span>'}</span>
+      <span class="k">最近心跳</span><span>${fmtTs(s.last_heartbeat_at)}</span>
+      <span class="k">最近同步</span><span>${fmtTs(s.last_sync_at)}</span>
+      <span class="k">最近全量扫描</span><span>${fmtTs(s.last_full_scan_at)}</span>
+      <span class="k">守护进程</span><span>${s.daemon_running ? "运行中" : "已停止"}</span>
+      <span class="k">运行时长</span><span>${s.uptime_sec != null ? Math.floor(s.uptime_sec / 60) + " 分钟" : "—"}</span>
+    </div>
+    <div class="kv" style="margin-top:10px">
       <span class="k">会话凭据</span><span>${a.has_session ? "存在（auth.json）" : "不存在"}</span>
       <span class="k">华为用户 ID</span><span>${esc(a.user_id || "—")}</span>
       <span class="k">图库解锁级别</span><span>${a.login_sec_level == 2 ? "2（完整，可同步）" : a.login_sec_level == 1 ? "1（受限，需二次验证解锁）" : "—"}</span>
       <span class="k">CAS 会话</span><span>${a.has_cas_tgt ? "有效" : "无"}</span>
       <span class="k">已保存账号密码</span><span>${a.credentials_configured ? "是" : "否（可用 cURL 导入）"}</span>
-      <span class="k">最近心跳</span><span>${fmtTs(s.last_heartbeat_at)}</span>
-      <span class="k">最近同步</span><span>${fmtTs(s.last_sync_at)}</span>
-      <span class="k">最近全量扫描</span><span>${fmtTs(s.last_full_scan_at)}</span>
-      <span class="k">守护进程</span><span>${s.daemon_running ? "运行中" : "已停止"}</span>
     </div>`;
 
   const r = s.last_report;
@@ -487,9 +592,10 @@ async function refreshStatus() {
 }
 
 async function triggerSync() {
+  const id = curId(); if (!id) return;
   const btn = $("btn-sync"); btn.disabled = true;
   try {
-    const r = await api("sync/trigger", { method: "POST", body: {} });
+    const r = await api(`accounts/${id}/sync/trigger`, { method: "POST", body: {} });
     toast(r.message || "已触发立即同步", "ok");
     setTimeout(refreshStatus, 3000);
   } catch (e) { toast(e.message, "err"); }
@@ -498,9 +604,10 @@ async function triggerSync() {
 
 let dryTimer = null;
 async function startDryRun() {
+  const id = curId(); if (!id) return;
   const btn = $("btn-dry"); btn.disabled = true;
   try {
-    const r = await api("sync/dry-run", { method: "POST", body: {} });
+    const r = await api(`accounts/${id}/sync/dry-run`, { method: "POST", body: {} });
     $("dry-status").innerHTML = `<span class="spin"></span> 预览进行中…`;
     dryTimer = setInterval(pollDryRun, 2000);
   } catch (e) {
@@ -509,8 +616,9 @@ async function startDryRun() {
   } finally { btn.disabled = false; }
 }
 async function pollDryRun() {
+  const id = curId(); if (!id) return;
   let s;
-  try { s = (await api("sync/dry-run")).dry_run; } catch (e) { return; }
+  try { s = (await api(`accounts/${id}/sync/dry-run`)).dry_run; } catch (e) { return; }
   if (!s.running) {
     clearInterval(dryTimer); dryTimer = null;
     if (s.error) { $("dry-status").textContent = ""; toast("预览失败：" + s.error, "err"); return; }
@@ -557,17 +665,20 @@ function mbToBytes(v) { return v === "" || v == null ? null : Math.round(parseFl
 function bytesToMb(v) { return v == null ? "" : String(Math.round(v / 1024 / 1024 * 100) / 100); }
 
 async function loadConfig(notify) {
+  const id = curId(); if (!id) return;
   if (!$("f-skip_videos")) renderSwitches();
   let c;
-  try { c = (await api("config")).config; }
+  try { c = (await api(`accounts/${id}`)).account; }
   catch (e) { toast("加载配置失败：" + e.message, "err"); return; }
+  window._albumsCache = c.albums || [];
+  window._excludeCache = c.exclude_albums || [];
   $("f-username").value = c.username || "";
   $("f-password").value = "";
   $("f-password-clear").checked = false;
   $("f-photos_dir").value = c.photos_dir || "";
   probePhotosDir(c.photos_dir || "");
+  checkSharedPhotosDir(id, c.photos_dir || "", "pd-shared");
   $("f-folder_structure").value = c.folder_structure || "";
-  $("f-timezone").value = c.timezone || "Asia/Shanghai";
   $("f-photo_size").value = c.photo_size || "original";
   $("f-file_match_policy").value = c.file_match_policy || "name-size-dedup-with-suffix";
   $("f-live_photo_mov_filename_policy").value = c.live_photo_mov_filename_policy || "none";
@@ -592,18 +703,17 @@ async function loadConfig(notify) {
   $("f-webhook_url").value = c.webhook_url || "";
   $("f-telegram_chat_id").value = c.telegram_chat_id || "";
   $("f-notification_script").value = c.notification_script || "";
-  $("f-log_level").value = c.log_level || "INFO";
   if (notify) toast("已还原为已保存配置", "ok");
 }
 
 async function saveConfig() {
+  const id = curId(); if (!id) return;
   const btn = $("btn-save-config"); btn.disabled = true;
   const numOrNull = (v, parse = parseInt) => (v === "" || v == null ? null : parse(v));
   const payload = {
     username: $("f-username").value.trim(),
     photos_dir: $("f-photos_dir").value.trim(),
     folder_structure: $("f-folder_structure").value.trim() || "{:%Y/%m/%d}",
-    timezone: $("f-timezone").value.trim() || "Asia/Shanghai",
     photo_size: $("f-photo_size").value,
     file_match_policy: $("f-file_match_policy").value,
     live_photo_mov_filename_policy: $("f-live_photo_mov_filename_policy").value,
@@ -634,7 +744,6 @@ async function saveConfig() {
     webhook_url: $("f-webhook_url").value.trim() || null,
     telegram_chat_id: $("f-telegram_chat_id").value.trim() || null,
     notification_script: $("f-notification_script").value.trim() || null,
-    log_level: $("f-log_level").value,
   };
   const pw = $("f-password").value;
   if ($("f-password-clear").checked) payload.password = "__clear__";
@@ -647,24 +756,28 @@ async function saveConfig() {
     if (!ok) { btn.disabled = false; return; }
   }
   try {
-    const r = await api("config", { method: "POST", body: payload });
+    const r = await api(`accounts/${id}`, { method: "PUT", body: payload });
     toast(r.message || "配置已保存", "ok");
     loadConfig();
   } catch (e) { toast("保存失败：" + e.message, "err"); }
   finally { btn.disabled = false; }
 }
 
-// --- 照片存储目录选择（fnOS 授权目录实时探测） ---
+// --- 照片存储目录选择（fnOS 授权目录实时探测；账号设置页与新建向导共用） ---
 
-async function openPhotosDirPicker() {
-  $("modal-body").innerHTML =
+let _pdCtx = { input: "f-photos_dir", probe: "pd-probe" };
+
+async function openPhotosDirPicker(inputId, probeId) {
+  _pdCtx = { input: inputId || "f-photos_dir", probe: probeId || "pd-probe" };
+  // 第二层弹窗：向导/表单 DOM 保持存活，选择后回填输入框
+  $("modal2-body").innerHTML =
     `<h3>选择照片存储目录</h3>
      <div id="pd-list" class="pd-list"><div class="tip">探测中…</div></div>
      <div class="actions">
        <button class="btn" onclick="loadPhotosDirs()">刷新</button>
-       <button class="btn" onclick="closeModal()">关闭</button>
+       <button class="btn" onclick="closeModal2()">关闭</button>
      </div>`;
-  $("overlay").classList.add("show");
+  $("overlay2").classList.add("show");
   await loadPhotosDirs();
 }
 
@@ -687,7 +800,7 @@ async function loadPhotosDirs() {
       const pickable = d.writable || d.readable;
       const onclick = pickable
         ? ` onclick='pickPhotosDir(${esc(JSON.stringify(d.path))}${d.writable ? "" : ",true"})'`
-        : "";
+        : ` onclick='toastDirUnauthorized()'`;
       return `<div class="pd-row${pickable ? "" : " pd-disabled"}"${onclick}><span class="pd-path">${esc(d.path)}</span>${d.custom ? '<span class="chip">手动</span>' : ""}${badge}</div>`;
     }).join("");
     box.innerHTML = rows + hint;
@@ -696,18 +809,74 @@ async function loadPhotosDirs() {
   }
 }
 
+function toastDirUnauthorized() {
+  toast("该目录未授权：fnOS 系统设置 → 应用 → 相册同步 → 应用设置 → 访问权限 中添加后点「刷新」", "warn");
+}
+
 function pickPhotosDir(path, readonly) {
-  $("f-photos_dir").value = path;
-  closeModal();
+  $(_pdCtx.input).value = path;
+  if (_pdCtx.input === "w-photos_dir") wiz.input.photos_dir = path;  // 向导场景同步暂存
+  closeModal2();
   probePhotosDir(path);
+  updateWizDirPreview();  // 仅向导场景生效（元素存在时）
+  const box2 = $("w-pd-shared");
+  if (box2) checkSharedPhotosDir(wiz.id, path, "w-pd-shared");
   if (readonly) toast("注意：该目录当前仅只读，引擎可能无法写入", "warn");
+}
+
+// --- 子目录派生预览 + 共享目录检测（与后端 derive_photos_dir/sanitize_account_name 规则一致，T29.6） ---
+function sanitizeAccountNameJs(name) {
+  let s = String(name ?? "").replace(/[\\/:*?"<>|\x00-\x1f]/g, "");
+  s = s.replace(/\s+/g, " ").trim().replace(/^\.+/, "").replace(/\.+$/, "").trim();
+  return s.slice(0, 48);
+}
+
+function normDir(p) { return String(p || "").trim().replace(/[\\/]+$/, ""); }
+
+function updateWizDirPreview() {
+  const box = $("w-pd-preview");
+  if (!box) return;
+  const base = ($("w-photos_dir").value || "").trim();
+  if (!base) { box.innerHTML = ""; return; }
+  const finalPath = computeWizFinalDir(base);
+  box.innerHTML = `实际存储路径：<b>${esc(finalPath)}</b>（自动追加账号名子目录，多账号互不混放）`;
+}
+
+// 最终落盘路径预览（镜像后端 derive_photos_dir：含重名追加 id 短后缀）
+function computeWizFinalDir(base) {
+  const idShort = wiz.id ? wiz.id.slice(-6) : "";
+  const leaf = sanitizeAccountNameJs(wiz.input.name) || idShort;
+  const sep = /[\\/]$/.test(base) ? "" : "/";
+  let p = base + sep + leaf;
+  const accounts = Array.isArray(window._accountsCacheAll) ? window._accountsCacheAll : [];
+  const taken = accounts.some(a => a.id !== wiz.id && normDir(a.photos_dir) === normDir(p));
+  if (taken) p = base + sep + leaf + "-" + idShort;
+  return p;
+}
+
+async function checkSharedPhotosDir(acctId, photosDir, boxId) {
+  const box = $(boxId);
+  if (!box) return;
+  const norm = normDir(photosDir);
+  if (!norm) { box.innerHTML = ""; return; }
+  let accounts = window._accountsCacheAll;
+  if (!Array.isArray(accounts)) {
+    try {
+      accounts = (await api("accounts")).accounts || [];
+      window._accountsCacheAll = accounts;
+    } catch (e) { box.innerHTML = ""; return; }
+  }
+  const clash = accounts.filter(a => a.id !== acctId && normDir(a.photos_dir) === norm);
+  box.innerHTML = clash.length
+    ? `<span class="pd-badge no">注意：与账号「${esc(clash.map(a => a.name || a.id).join("、"))}」使用同一存储目录，照片会混放（新账号创建时会自动派生独立子目录，存量账号请手动调整）</span>`
+    : "";
 }
 
 // 手输路径实时探测（防抖 450ms，与 fnOS 授权状态实时一致）
 let pdProbeTimer = null;
 function probePhotosDir(value) {
   clearTimeout(pdProbeTimer);
-  const box = $("pd-probe");
+  const box = $(_pdCtx.probe);
   if (!box) return;
   const path = (value || "").trim();
   if (!path) { box.innerHTML = ""; return; }
@@ -729,7 +898,7 @@ function probePhotosDir(value) {
 
 // 登记当前输入的路径到「可选目录」清单（服务端探测可写才入库，去重不重启服务）
 async function addCustomPhotosDir() {
-  const path = ($("f-photos_dir").value || "").trim();
+  const path = ($(_pdCtx.input).value || "").trim();
   if (!path) return;
   try {
     const r = await api("photos_dirs/custom", { method: "POST", body: { path } });
@@ -754,11 +923,14 @@ const CRON_PRESETS = [
   ["@weekly", "@weekly（每周日 00:00）"],
 ];
 
-function openCronPicker() {
-  const cur = $("f-cron").value.trim();
+let _cronTarget = "f-cron";
+
+function openCronPicker(targetId) {
+  _cronTarget = targetId || "f-cron";
+  const cur = $(_cronTarget).value.trim();
   const isPreset = CRON_PRESETS.some(([e]) => e === cur);
   const parsed = parseCronToBuilder(cur);
-  $("modal-body").innerHTML = `
+  $("modal2-body").innerHTML = `
     <h3>选择定时计划</h3>
     <div class="cron-top">
       <span class="cron-lbl">常用预设</span>
@@ -781,10 +953,10 @@ function openCronPicker() {
       <ul id="cron-preview-list"><li class="warn">—</li></ul>
     </div>
     <div class="actions">
-      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn" onclick="closeModal2()">取消</button>
       <button class="btn primary" onclick="applyCronPick()">确定</button>
     </div>`;
-  $("overlay").classList.add("show");
+  $("overlay2").classList.add("show");
   cronBuilderDirty = false;
   initCronBuilderState(parsed);
   renderCronBuilder();
@@ -1046,8 +1218,8 @@ function applyCronPick() {
   if (expr && !/^(@\w+|\S+\s+\S+\s+\S+\s+\S+\s+\S+)$/.test(expr)) {
     toast("表达式格式不正确：应为 5 段（分 时 日 月 周）或 @ 宏", "err"); return;
   }
-  $("f-cron").value = expr;
-  closeModal();
+  $(_cronTarget).value = expr;
+  closeModal2();
   if (expr) toast("已填入定时计划：" + expr, "ok");
 }
 
@@ -1061,10 +1233,19 @@ function currentAllMode() {
 }
 
 async function loadAlbums() {
+  const id = curId(); if (!id) return;
   $("album-error").innerHTML = "";
   $("album-list").innerHTML = `<div class="empty">加载中…</div>`;
   let albums;
-  try { albums = (await api("albums")).albums; }
+  try {
+    const [al, cfg] = await Promise.all([
+      api(`accounts/${id}/albums`),
+      api(`accounts/${id}`),
+    ]);
+    albums = al.albums;
+    window._albumsCache = cfg.account.albums || [];
+    window._excludeCache = cfg.account.exclude_albums || [];
+  }
   catch (e) {
     $("album-error").innerHTML = `<div class="banner err">获取相册失败：${esc(e.message)}${/登录|凭据|认证/i.test(e.message) ? "——请先到「认证与安全」完成登录。" : ""}</div>`;
     $("album-list").innerHTML = ""; return;
@@ -1104,6 +1285,7 @@ function selectAlbums(all) {
 }
 
 async function saveAlbums() {
+  const id = curId(); if (!id) return;
   const all = currentAllMode();
   const picked = [];
   document.querySelectorAll('#album-list input[type=checkbox]').forEach(r => {
@@ -1111,7 +1293,7 @@ async function saveAlbums() {
   });
   const body = all ? { albums: [], exclude_albums: picked } : { albums: picked, exclude_albums: [] };
   try {
-    await api("config", { method: "POST", body });
+    await api(`accounts/${id}`, { method: "PUT", body });
     window._albumsCache = body.albums;
     window._excludeCache = body.exclude_albums;
     albumAllModeUI = null;
@@ -1123,8 +1305,9 @@ async function saveAlbums() {
 
 /* ---------- 认证与安全 ---------- */
 async function refreshAuth() {
+  const id = curId(); if (!id) return;
   let a;
-  try { a = await api("auth/status"); } catch (e) {
+  try { a = (await api(`accounts/${id}/auth/status`)).auth; } catch (e) {
     $("auth-panel").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return;
   }
   const lvl = a.login_sec_level == 2 ? "2（完整访问）" : a.login_sec_level == 1 ? "1（受限，待解锁）" : "—";
@@ -1153,11 +1336,12 @@ function showTwoFa(channels, note) {
 }
 
 async function webLogin() {
+  const id = curId(); if (!id) return;
   const btn = $("btn-login"); btn.disabled = true;
   $("login-output").innerHTML = `<span class="spin"></span> 登录中，最长约 30 秒…`;
   $("twofa-panel").style.display = "none";
   try {
-    const r = await api("auth/login", { method: "POST", body: {} });
+    const r = await api(`accounts/${id}/auth/login`, { method: "POST", body: {} });
     if (r.status === "2fa_required") {
       $("login-output").innerHTML = `<div class="banner warn">${esc(r.message)}</div>`;
       showTwoFa(r.channels, "请选择接收通道并输入验证码：");
@@ -1178,7 +1362,7 @@ async function submit2fa() {
   if (!/^\d{6}$/.test(code)) { toast("请输入 6 位数字验证码", "err"); return; }
   const btn = $("btn-2fa"); btn.disabled = true;
   try {
-    const r = await api("auth/2fa", { method: "POST", body: { code } });
+    const r = await api(`accounts/${curId()}/auth/2fa`, { method: "POST", body: { code } });
     if (r.status === "2fa_required") {
       showTwoFa(r.channels, "验证码校验未通过，请重新输入：");
       toast("验证码校验未通过", "err");
@@ -1196,7 +1380,7 @@ async function importCurl() {
   if (!text) { toast("请先粘贴 cURL 内容", "err"); return; }
   const btn = $("btn-import-curl"); btn.disabled = true;
   try {
-    const r = await api("auth/import-curl", { method: "POST", body: { curl: text } });
+    const r = await api(`accounts/${curId()}/auth/import-curl`, { method: "POST", body: { curl: text } });
     toast(r.message || "导入成功", "ok");
     $("curl-text").value = "";
   } catch (e) { toast(e.message, "err"); }
@@ -1206,24 +1390,462 @@ function clearCurl() { $("curl-text").value = ""; }
 
 /* ---------- 日志 ---------- */
 async function loadLogs() {
+  const id = curId(); if (!id) return;
   try {
-    const r = await api(`logs?lines=${$("log-lines").value}`);
+    const r = await api(`accounts/${id}/logs?lines=${$("log-lines").value}`);
     const view = $("log-view");
     view.textContent = r.lines.join("") || "（暂无日志）";
     view.scrollTop = view.scrollHeight;
   } catch (e) { $("log-view").textContent = "加载失败：" + e.message; }
 }
 
+/* ---------- 账号管理 ---------- */
+function acctStatusBadge(a) {
+  if (!a.enabled) return '<span class="badge off">已停用</span>';
+  if (a.ok === true && a.auth_valid !== false) return '<span class="badge ok">正常</span>';
+  if (a.ok === true) return '<span class="badge warn">登录失效</span>';
+  return `<span class="badge err">${esc(a.last_error || "异常")}</span>`;
+}
+
+async function loadAccounts() {
+  try {
+    const d = await api("accounts");
+    window._accountsCacheAll = d.accounts || [];  // 共享目录检测用（T29.6）
+    renderAccountList(d.accounts || []);
+    updateAggregateBadge(d.accounts || []);
+  } catch (e) {
+    $("account-list").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+function updateAggregateBadge(items) {
+  const enabled = items.filter(a => a.enabled);
+  if (!items.length) { setAuthBadge(false, "未配置账号", "off"); return; }
+  const okCount = enabled.filter(a => a.ok === true && a.auth_valid !== false).length;
+  const badCount = enabled.length - okCount;
+  if (badCount === 0) setAuthBadge(true, `${enabled.length}/${items.length} 账号正常`);
+  else setAuthBadge(false, `${badCount} 个账号待处理`);
+}
+
+function acctOpenArgs(a) {
+  return esc(JSON.stringify({ id: a.id, name: a.name })).replace(/'/g, "&#39;");
+}
+
+function renderAccountList(items) {
+  const box = $("account-list");
+  if (!items.length) {
+    box.innerHTML = `<div class="empty">还没有账号。点击右上角「新建账号」添加第一个华为云空间账号。</div>`;
+    return;
+  }
+  box.innerHTML = items.map(a => {
+    const sub = [a.username, a.last_sync_at ? `最近同步 ${fmtTs(a.last_sync_at)}` : "从未同步"]
+      .filter(Boolean).join(" · ");
+    return `<div class="acct-card ${a.enabled ? "" : "disabled"}">
+      <div class="acct-main">
+        <div class="acct-title">${esc(a.name)}
+          <span class="plat-chip">☁ ${esc(PLATFORM_LABELS[a.platform] || a.platform || "-")}</span>
+          ${acctStatusBadge(a)}
+          ${a.daemon_running ? "" : a.enabled ? '<span class="badge warn">daemon 未运行</span>' : ""}
+        </div>
+        <div class="acct-sub">${esc(sub)}</div>
+        ${a.last_error ? `<div class="acct-sub" style="color:var(--red,#c0392b)">${esc(a.last_error)}</div>` : ""}
+      </div>
+      <div class="acct-actions">
+        <button class="btn primary" onclick='openAccount(${acctOpenArgs(a)})'>进入管理</button>
+        <div style="display:flex;gap:6px">
+          <button class="btn" onclick="toggleAccount('${esc(a.id)}',${a.enabled ? "false" : "true"})">${a.enabled ? "停用" : "启用"}</button>
+          <button class="btn danger" onclick="deleteAccount('${esc(a.id)}','${esc(a.name)}')">删除</button>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+async function toggleAccount(id, enabled) {
+  try {
+    const r = await api(`accounts/${id}/${enabled ? "enable" : "disable"}`, { method: "POST", body: { enabled } });
+    toast(r.message || (enabled ? "已启用" : "已停用"), "ok");
+    loadAccounts();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function deleteAccount(id, name) {
+  modalConfirm("删除账号", `确定删除账号「${esc(name)}」？<br>
+    <span class="tip">将删除该账号的登录态、同步记录与日志；<strong>已下载的照片文件不会被删除</strong>。此操作不可恢复。</span>`,
+    async () => {
+      try {
+        const r = await api(`accounts/${id}`, { method: "DELETE" });
+        toast(r.message || "账号已删除", "ok");
+        loadAccounts();
+      } catch (e) { toast(e.message, "err"); }
+    }, "确认删除");
+}
+
+/* ---------- 状态总览（聚合） ---------- */
+async function refreshOverview() {
+  let d;
+  try { d = await api("status"); }
+  catch (e) { $("overview-table").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return; }
+  $("ver").textContent = d.version || "-";
+  $("uptime").textContent = d.uptime_sec != null ? `运行 ${Math.floor(d.uptime_sec / 60)} 分钟` : "";
+  renderOverview(d);
+}
+
+function renderOverview(d) {
+  const items = d.accounts || [];
+  updateAggregateBadge(items);
+  if (!items.length) {
+    $("overview-table").innerHTML = `<div class="empty">还没有账号——去「账号管理」添加。</div>`;
+    $("overview-kv").innerHTML =
+      `<span class="k">版本</span><span>${esc(d.version || "-")}</span>
+       <span class="k">运行时长</span><span>${Math.floor((d.uptime_sec || 0) / 60)} 分钟</span>
+       <span class="k">账号数</span><span>0</span>`;
+    return;
+  }
+  const enabled = items.filter(a => a.enabled);
+  const bad = enabled.filter(a => !(a.ok === true));
+  $("overview-banner").innerHTML = bad.length === 0
+    ? `<div class="banner" style="background:#e7f6ee;color:#147a45;border:1px solid #bfe8d1">✅ 全部 ${enabled.length} 个启用账号运行正常</div>`
+    : `<div class="banner warn">⚠ ${bad.length} 个账号状态待处理：${esc(bad.map(a => a.name).join("、"))}</div>`;
+  $("overview-table").innerHTML = `
+    <table class="ov-table" style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="color:var(--muted);text-align:left">
+        <th>账号</th><th>平台</th><th>状态</th><th>最近同步</th><th>最近错误</th><th></th>
+      </tr></thead>
+      <tbody>${items.map(a => `<tr style="border-top:1px solid var(--border)">
+        <td>${esc(a.name)}</td>
+        <td>${esc(PLATFORM_LABELS[a.platform] || a.platform || "-")}</td>
+        <td>${acctStatusBadge(a)}</td>
+        <td>${fmtTs(a.last_sync_at)}</td>
+        <td style="color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.last_error || "—")}</td>
+        <td><button class="btn" onclick='openAccount(${acctOpenArgs(a)})'>管理</button></td>
+      </tr>`).join("")}</tbody>
+    </table>`;
+  $("overview-kv").innerHTML =
+    `<span class="k">版本</span><span>${esc(d.version || "-")}</span>
+     <span class="k">运行时长</span><span>${Math.floor((d.uptime_sec || 0) / 60)} 分钟</span>
+     <span class="k">账号数</span><span>${items.length}（启用 ${enabled.length}）</span>`;
+}
+
+/* ---------- 全局设置 ---------- */
+async function loadGlobal(notify) {
+  try {
+    const s = (await api("settings")).settings;
+    $("g-timezone").value = s.timezone || "Asia/Shanghai";
+    $("g-log_level").value = s.log_level || "INFO";
+    renderGlobalCustomDirs(s.custom_photos_dirs || []);
+    if (notify) toast("已还原为已保存设置", "ok");
+  } catch (e) { toast("加载全局设置失败：" + e.message, "err"); }
+}
+
+function renderGlobalCustomDirs(dirs) {
+  const box = $("g-custom-dirs");
+  box.innerHTML = dirs.length
+    ? dirs.map(d => `<div class="chan-row"><span class="pd-path">${esc(d)}</span>
+        <button class="btn" style="margin-left:auto" onclick="removeCustomDir('${esc(d)}')">移除</button></div>`).join("")
+    : "暂无手动登记目录。提示：在账号的存储目录弹窗中手输路径并登记，即可沉淀到此处供各账号复用。";
+}
+
+async function removeCustomDir(d) {
+  try {
+    const s = await api("settings");
+    const dirs = ((s.settings || {}).custom_photos_dirs || []).filter(x => x !== d);
+    const r = await api("settings", { method: "PUT", body: { custom_photos_dirs: dirs } });
+    toast(r.message || "已移除", "ok");
+    loadGlobal();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function saveGlobal() {
+  try {
+    const r = await api("settings", {
+      method: "PUT",
+      body: {
+        timezone: $("g-timezone").value.trim() || "Asia/Shanghai",
+        log_level: $("g-log_level").value,
+      },
+    });
+    toast(r.message || "全局设置已保存（全部账号热生效）", "ok");
+  } catch (e) { toast("保存失败：" + e.message, "err"); }
+}
+
+/* ---------- 新建账号向导（凭据 → 存储调度 → 相册） ---------- */
+const wiz = {
+  step: 1, id: null, name: "", busy: false,
+  // 各步输入暂存：步骤往返/重渲染时回填（T29.4）
+  input: { name: "", username: "", password: "", photos_dir: "", folder_structure: "{:%Y/%m/%d}", cron: "" },
+};
+
+function wizResetInput() {
+  wiz.input = { name: "", username: "", password: "", photos_dir: "", folder_structure: "{:%Y/%m/%d}", cron: "" };
+}
+
+function wizStepsHtml() {
+  const labels = ["凭据", "存储与调度", "相册（可跳过）"];
+  return `<div class="wiz-steps">${labels.map((l, i) =>
+    `<div class="wiz-step ${wiz.step === i + 1 ? "active" : wiz.step > i + 1 ? "done" : ""}">${i + 1}. ${l}${wiz.step > i + 1 ? " ✓" : ""}</div>`).join("")}</div>`;
+}
+
+function openAccountWizard() {
+  wiz.step = 1; wiz.id = null; wiz.name = "";
+  wizResetInput();
+  renderWizard();
+}
+
+function renderWizard() {
+  let body = "";
+  if (wiz.step === 1) {
+    body = `
+      <h3>新建账号 — 平台与凭据</h3>
+      ${wizStepsHtml()}
+      <div class="field"><label>账号名称</label><input type="text" id="w-name" placeholder="如：家人相册、主号" value="${esc(wiz.input.name)}">
+        <span class="tip">仅用于列表展示，可随时修改</span></div>
+      <div class="field"><label>平台</label>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <label style="display:flex;gap:8px;align-items:flex-start;border:1px solid var(--border);border-radius:8px;padding:10px 14px;cursor:pointer">
+            <input type="radio" name="w-platform" value="huawei" checked style="margin-top:3px">
+            <span><b>华为云空间</b><br><span class="tip">相册同步 / 2FA / cURL 导入</span></span></label>
+          <label style="display:flex;gap:8px;align-items:flex-start;border:1px dashed var(--border);border-radius:8px;padding:10px 14px;opacity:.5">
+            <input type="radio" disabled style="margin-top:3px">
+            <span><b>小米云空间</b><br><span class="tip">规划中</span></span></label>
+        </div></div>
+      <div class="field"><label>华为账号（手机号/邮箱）</label><input type="text" id="w-username" placeholder="用于登录态过期后自动重登，可留空" value="${esc(wiz.input.username)}">
+      </div>
+      <div class="field"><label>密码</label><input type="password" id="w-password" placeholder="用于自动重登，可留空" value="${esc(wiz.input.password)}">
+        <span class="tip">保存于应用私有数据目录（chmod 600），不发往任何第三方；也可创建后仅用 cURL 导入会话</span></div>
+      <div class="actions">
+        <button class="btn" onclick="closeModal()">取消</button>
+        <button class="btn primary" id="w-next" onclick="wizStep1()">创建账号</button>
+      </div>`;
+  } else if (wiz.step === 2) {
+    body = `
+      <h3>新建账号 — 存储与调度</h3>
+      ${wizStepsHtml()}
+      <div class="field"><label>照片存储目录</label>
+        <div style="display:flex;gap:8px"><input type="text" id="w-photos_dir" placeholder="留空 = 默认目录 photos/${esc(wiz.id)}" value="${esc(wiz.input.photos_dir)}" oninput="wiz.input.photos_dir=this.value; probePhotosDir(this.value); updateWizDirPreview(); checkSharedPhotosDir(wiz.id, this.value, 'w-pd-shared')">
+          <button class="btn" onclick="openPhotosDirPicker('w-photos_dir','w-pd-probe')">浏览</button></div>
+        <div id="w-pd-probe" style="margin-top:4px"></div>
+        <div id="w-pd-preview" class="tip" style="margin-top:4px"></div>
+        <div id="w-pd-shared" style="margin-top:4px"></div></div>
+      <div class="field"><label>按日期分目录</label><select id="w-folder_structure" onchange="wiz.input.folder_structure=this.value">
+        <option value="{:%Y/%m/%d}">年/月/日</option>
+        <option value="{:%Y/%m}">年/月</option>
+        <option value="{:%Y}">仅按年</option>
+        <option value="">不分组（全部平铺）</option></select></div>
+      <div class="field"><label>定时同步（cron）</label>
+        <div style="display:flex;gap:8px"><input type="text" id="w-cron" placeholder="0 3 * * *" value="${esc(wiz.input.cron)}" oninput="wiz.input.cron=this.value">
+          <button class="btn" onclick="openCronPicker('w-cron')">选择</button></div>
+        <span class="tip">留空 = 默认每天 03:00；「启动即同步」默认开启。多账号建议错峰（如 03:00 / 04:00）</span></div>
+      <div class="actions">
+        <button class="btn" onclick="wizGoStep(1)">上一步</button>
+        <button class="btn primary" id="w-next" onclick="wizStep2()">保存并继续</button>
+      </div>`;
+  } else {
+    body = `
+      <h3>新建账号 — 相册选择（可跳过）</h3>
+      ${wizStepsHtml()}
+      <div id="w-album-box"><div class="tip">加载中…（若该账号尚未登录，此步可跳过，登录后在工作区配置）</div></div>
+      <div class="actions">
+        <button class="btn" onclick="finishWizard()">跳过 / 完成</button>
+      </div>`;
+  }
+  $("modal-body").innerHTML = body;
+  $("overlay").classList.add("show");
+  if (wiz.step === 2) {
+    _pdCtx = { input: "w-photos_dir", probe: "w-pd-probe" };  // 向导内探测目标
+    $("w-folder_structure").value = wiz.input.folder_structure;
+    updateWizDirPreview();
+    checkSharedPhotosDir(wiz.id, $("w-photos_dir").value, "w-pd-shared");
+    backfillWizStep2FromServer();
+  }
+  if (wiz.step === 3) loadWizAlbums();
+}
+
+// step2 重渲染兜底：输入值一律来自 wiz.input 暂存（含 picker/手动输入实时同步）；
+// 服务端配置仅作 placeholder 提示——注意 GET 返回的 photos_dir 是回退后的运行时视图
+// （空值已被填充为 photos/<id> 默认根），不能当作用户已保存的值回填
+async function backfillWizStep2FromServer() {
+  if (!wiz.id) return;
+  try {
+    const r = await api(`accounts/${wiz.id}`);
+    const acc = r.account || {};
+    if (acc.photos_dir) $("w-photos_dir").placeholder = `留空 = 默认目录 ${acc.photos_dir}`;
+    if (acc.cron) $("w-cron").placeholder = String(acc.cron);
+  } catch (e) { /* 兜底失败静默，继续用内存暂存值 */ }
+}
+
+function wizGoStep(n) { wiz.step = n; renderWizard(); }
+
+async function wizStep1() {
+  const name = ($("w-name").value || "").trim();
+  const username = ($("w-username").value || "").trim();
+  const password = $("w-password").value;
+  wiz.input.name = name; wiz.input.username = username; wiz.input.password = password;
+  const btn = $("w-next"); btn.disabled = true;
+  try {
+    let r;
+    if (wiz.id) {
+      // 「上一步」回到第一步后再次提交：更新已有账号，避免重复创建
+      r = await api(`accounts/${wiz.id}`, { method: "PUT", body: { name, username, password } });
+      toast("凭据已更新，继续配置存储目录", "ok");
+    } else {
+      r = await api("accounts", {
+        method: "POST",
+        // T30.5：归属当前登录用户（普通用户服务端强制本人；admin 指定/缺省无主）
+        body: { name, username, password, platform: "huawei",
+                owner: ME ? ME.user_id : "" },
+      });
+      wiz.id = r.account.id;
+      toast("账号已创建（默认停用），继续配置存储目录", "ok");
+    }
+    wiz.name = r.account.name || name;
+    wiz.step = 2;
+    renderWizard();
+  } catch (e) { toast("保存失败：" + e.message, "err"); btn.disabled = false; }
+}
+
+async function wizStep2() {
+  const btn = $("w-next"); btn.disabled = true;
+  const photos_dir = ($("w-photos_dir").value || "").trim();
+  const folder_structure = $("w-folder_structure").value;
+  const cron = ($("w-cron").value || "").trim() || null;
+  wiz.input.photos_dir = photos_dir;
+  wiz.input.folder_structure = folder_structure;
+  wiz.input.cron = cron || "";
+  try {
+    await api(`accounts/${wiz.id}`, {
+      method: "PUT",
+      // derive_subdir：向导创建流程要求后端派生 <目录>/<账号名> 子目录（与预览一致）
+      body: { photos_dir, folder_structure, cron, derive_subdir: true },
+    });
+    wiz.step = 3;
+    renderWizard();
+  } catch (e) { toast("保存失败：" + e.message, "err"); btn.disabled = false; }
+}
+
+async function loadWizAlbums() {
+  const box = $("w-album-box");
+  if (!box) return;
+  try {
+    const [al, cfg] = await Promise.all([
+      api(`accounts/${wiz.id}/albums`),
+      api(`accounts/${wiz.id}`),
+    ]);
+    const albums = al.albums || [];
+    const selected = new Set(cfg.account.albums || []);
+    if (!albums.length) { box.innerHTML = `<div class="tip">云端没有相册。</div>`; return; }
+    box.innerHTML = `
+      <div class="tip">勾选要同步的相册（不勾 = 同步全部相册）：</div>
+      <div style="max-height:260px;overflow:auto;margin-top:6px">
+        ${albums.map(a => `<div class="album-item">
+          <input type="checkbox" data-name="${esc(a.name)}" ${selected.has(a.name) ? "checked" : ""}>
+          <span class="name">${esc(a.name)}</span>
+          <span class="meta">${a.img_num ?? 0} 照片 / ${a.video_num ?? 0} 视频</span>
+        </div>`).join("")}
+      </div>
+      <div class="actions" style="margin-top:10px">
+        <button class="btn" onclick="finishWizard()">跳过</button>
+        <button class="btn primary" onclick="wizSaveAlbums()">保存相册并完成</button>
+      </div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="tip">相册需登录后才能获取：${esc(e.message)}<br>
+      可先跳过，创建完成后到「认证与安全」登录，再在「相册选择」页配置。</div>
+      <div class="actions" style="margin-top:10px">
+        <button class="btn primary" onclick="finishWizard()">完成</button>
+      </div>`;
+  }
+}
+
+async function wizSaveAlbums() {
+  const picked = [];
+  document.querySelectorAll("#w-album-box input[type=checkbox]").forEach(r => {
+    if (r.checked) picked.push(r.dataset.name);
+  });
+  const body = picked.length ? { albums: picked, exclude_albums: [] } : { albums: [], exclude_albums: [] };
+  try {
+    await api(`accounts/${wiz.id}`, { method: "PUT", body });
+    finishWizard();
+  } catch (e) { toast("相册保存失败：" + e.message, "err"); }
+}
+
+async function finishWizard() {
+  const id = wiz.id, name = wiz.name;
+  if (!id) { closeModal(); loadAccounts(); return; }
+  // 创建时默认停用（后端强制），向导完成时显式启用
+  try { await api(`accounts/${id}/enable`, { method: "POST", body: { enabled: true } }); }
+  catch (e) { toast("启用失败：" + e.message, "err"); }
+  // 完成页：引导用户到认证与安全完成登录（含 2FA 验证码）
+  $("modal-body").innerHTML = `
+    <h3>账号已创建并启用</h3>
+    <div class="tip" style="line-height:1.9">
+      最后一步：请到 <b>「认证与安全」</b> 完成登录后同步才会运行。<br>
+      · 华为账号登录通常需要输入短信验证码（二次验证），在该页按提示操作即可<br>
+      · 若未填写账号密码，可在该页使用「cURL 导入」直接导入登录态<br>
+      · 登录过程中请勿关闭页面
+    </div>
+    <div class="actions">
+      <button class="btn" onclick="wizDoneLater()">稍后在账号列表处理</button>
+      <button class="btn primary" onclick="wizGoAuth()">前往认证与安全</button>
+    </div>`;
+}
+
+function wizGoAuth() {
+  const id = wiz.id, name = wiz.name;
+  wiz.step = 1; wiz.id = null; wiz.name = "";  // 复位向导状态
+  closeModal();
+  openAccount({ id, name }, "auth");
+}
+
+function wizDoneLater() {
+  wiz.step = 1; wiz.id = null; wiz.name = "";
+  closeModal();
+  loadAccounts();
+}
+
+/* ---------- 当前身份（T30 多用户隔离，路线 A） ---------- */
+let ME = null; // {user_id, username, is_admin, via_gateway, sees_all}
+
+function meLabel() {
+  if (!ME) return "";
+  if (!ME.via_gateway) return "本机管理";
+  if (ME.sees_all) return `管理员 · ${ME.username || ME.user_id}`;
+  return ME.username || ME.user_id || "用户";
+}
+
+function renderIdentity() {
+  const b = $("me-badge");
+  if (!ME) { b.style.display = "none"; return; }
+  b.style.display = "";
+  b.className = "badge" + (ME.sees_all ? " ok" : "");
+  b.textContent = meLabel();
+  const scope = (ME.via_gateway && !ME.sees_all)
+    ? "仅显示归属你（" + meLabel() + "）的账号"
+    : "同一平台可添加多个账号，各自独立同步、互不干扰"
+      + (ME.via_gateway ? "；管理员可见全部账号" : "（直连本机，全部可见）");
+  const ah = $("accounts-owner-hint");
+  if (ah) ah.textContent = scope;
+  const oh = $("overview-hint");
+  if (oh) oh.textContent = scope;
+}
+
+async function loadMe() {
+  try { ME = (await api("me")).me || null; }
+  catch (e) { ME = null; }
+  renderIdentity();
+}
+
 /* ---------- 初始化 ---------- */
 window._albumsCache = window._albumsCache || [];
 window._excludeCache = window._excludeCache || [];
 (async function init() {
+  buildNav();
+  switchTab("accounts");
+  loadMe();  // T30.5：身份徽章与可见范围提示（不阻塞首屏）
   try {
-    const c = (await api("config")).config;
-    window._albumsCache = c.albums || [];
-    window._excludeCache = c.exclude_albums || [];
-  } catch (e) { /* 忽略，相册页会再加载 */ }
-  switchTab("status");
+    const d = await api("status");
+    $("ver").textContent = d.version || "-";
+    $("uptime").textContent = d.uptime_sec != null ? `运行 ${Math.floor(d.uptime_sec / 60)} 分钟` : "";
+  } catch (e) { /* 服务暂不可达，各页自会提示 */ }
 })();
 </script>
 </body>

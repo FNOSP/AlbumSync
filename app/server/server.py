@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""AlbumSync 业务后端服务（fnOS 原生应用服务壳）。
+"""AlbumSync 业务后端服务（fnOS 原生应用服务壳，多账号版）。
 
-架构模式（参照 FreePower/LastDisciple 已验证模型）：
+架构模式（参照 FreePower/LastDiscard 已验证模型）：
 - 同时监听 TCP 端口和 Unix domain socket，兼容 fnOS 统一网关
 - TCP 端口：供 checkport 健康检查与直连访问
 - Unix socket：供 fnOS 网关（nginx）通过 gatewaySocket=app.sock 代理流量
-- 进程内组装 hwcloudpd 引擎（AppRuntime），后台线程运行 SyncDaemon
+- 进程内组装 SchedulerManager（多账号运行时管理器），每账号后台线程运行 SyncDaemon
+
+API 形态：
+  全局：/api/status /api/settings /api/photos_dirs* /api/accounts（列表/创建）
+  账号：/api/accounts/{id}[/{status|albums|auth/*|logs|sync/*}]（PUT 更新、DELETE 删除）
 
 启动方式：
   # fnOS 部署模式（TCP + Unix socket，参数顺序与 cmd/main 一致）
@@ -18,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import socket
 import socketserver
@@ -32,9 +37,18 @@ SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 if SERVER_DIR not in sys.path:
     sys.path.insert(0, SERVER_DIR)  # vendored 引擎 app/server/hwcloudpd/
 
-from app_runtime import APP_NAME, APP_VERSION, AppRuntime  # noqa: E402
+from app_runtime import APP_NAME, APP_VERSION  # noqa: E402
+from hwcloudpd.models import AuthExpiredError, InvalidCredentialsError  # noqa: E402
+from identity import (  # noqa: E402
+    Requestor,
+    bind_requestor,
+    current_requestor,
+    parse_requestor,
+)
+from scheduler import SchedulerManager  # noqa: E402
 
 MAX_BODY_BYTES = 1 * 1024 * 1024  # 1MB（cURL 粘贴足够）
+_ACCOUNT_PATH_RE = re.compile(r"^/api/accounts/([^/]+)(?:/(.+))?$")
 
 
 # ========== fnOS 网关兼容 ==========
@@ -73,7 +87,7 @@ class RequestHandler(GatewayMixin, BaseHTTPRequestHandler):
     """业务 API + 静态文件，兼容 fnOS 网关与直连两种访问方式。"""
 
     static_dir = str(Path(SERVER_DIR).parent / "ui")
-    runtime: AppRuntime | None = None
+    manager: SchedulerManager | None = None
 
     MIME_TYPES = {
         ".html": "text/html", ".htm": "text/html", ".css": "text/css",
@@ -156,16 +170,52 @@ class RequestHandler(GatewayMixin, BaseHTTPRequestHandler):
         try:
             self.safe_send_response(200)
             self.safe_send_header("Access-Control-Allow-Origin", "*")
-            self.safe_send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.safe_send_header("Access-Control-Allow-Methods",
+                                  "GET, POST, PUT, DELETE, OPTIONS")
             self.safe_send_header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept")
             self.safe_send_header("Access-Control-Max-Age", "86400")
             self.safe_end_headers()
         except Exception:
             pass
 
+    # --- 身份层（T30 路线 A：网关身份头直信，直连=本机 admin） ---
+
+    def begin_request(self) -> Requestor:
+        """解析并绑定当前请求身份。Threading 服务器每请求独立线程/上下文，
+        manager 方法经 identity.current_requestor() 读取。"""
+        requestor = parse_requestor(self.headers)
+        bind_requestor(requestor)
+        return requestor
+
+    @staticmethod
+    def _me_payload(r: Requestor) -> dict:
+        return {
+            "user_id": r.user_id,
+            "username": r.username,
+            "is_admin": r.is_admin,
+            "via_gateway": r.via_gateway,
+            "sees_all": r.sees_all,
+        }
+
+    def handle_me(self) -> None:
+        """当前请求者身份（前端 T30.5 用于身份显示与可见性推断）。"""
+        self.send_json_response(200, {
+            "success": True, "me": self._me_payload(current_requestor()),
+        })
+
+    def handle_debug_headers(self) -> None:
+        """T30.3 诊断端点：经网关访问确认 CGI 注入的身份头取值与防伪造。"""
+        r = current_requestor()
+        self.send_json_response(200, {
+            "success": True,
+            "requestor": self._me_payload(r),
+            "headers": {k: str(v) for k, v in self.headers.items()},
+        })
+
     # --- 路由分发 ---
 
     def do_GET(self) -> None:  # noqa: N802
+        self.begin_request()
         parsed = urlparse(self.path)
         original_path = parsed.path
         path = self.strip_gateway_prefix(original_path)
@@ -184,35 +234,35 @@ class RequestHandler(GatewayMixin, BaseHTTPRequestHandler):
         try:
             if path == "/health":
                 self.handle_health()
+            elif path == "/api/me":
+                self.handle_me()
+            elif path == "/api/debug/headers":
+                self.handle_debug_headers()
             elif path == "/api/status":
-                self.api_get(self.runtime.status_snapshot)
-            elif path == "/api/auth/status":
-                self.api_get(self.runtime.auth_status)
-            elif path == "/api/albums":
-                self.api_get(self.runtime.list_albums, wrap_key="albums")
-            elif path == "/api/config":
-                self.api_get(self.runtime.get_config, wrap_key="config")
+                self.api_get(self.manager.status_snapshot)
+            elif path == "/api/settings":
+                self.api_get(self.manager.get_settings, wrap_key="settings")
+            elif path == "/api/accounts":
+                self.api_get(self.manager.list_accounts, wrap_key="accounts")
             elif path == "/api/photos_dirs":
-                self.api_get(self.runtime.probe_photos_dirs, wrap_key="dirs")
+                self.api_get(self.manager.probe_photos_dirs, wrap_key="dirs")
             elif path == "/api/photos_dirs/check":
                 target = query.get("path", [""])[0]
-                self.api_get(lambda: self.runtime.probe_single_dir(target),
+                self.api_get(lambda: self.manager.probe_single_dir(target),
                              wrap_key="probe")
-            elif path == "/api/logs":
-                lines = int(query.get("lines", ["200"])[0])
-                self.send_json_response(200, {
-                    "success": True, "lines": self.runtime.tail_logs(lines),
-                })
-            elif path == "/api/sync/dry-run":
-                self.send_json_response(200, {
-                    "success": True, "dry_run": self.runtime.dry_run_status(),
-                })
+            elif path.startswith("/api/accounts/"):
+                self.handle_account_get(path, query)
             else:
                 self.serve_static_file(path)
+        except KeyError as exc:
+            self.send_error_json(404, str(exc.args[0] if exc.args else exc))
+        except (AuthExpiredError, InvalidCredentialsError) as exc:
+            self.handle_auth_error(exc)
         except Exception as exc:
             self.send_error_json(500, f"内部错误: {exc}")
 
     def do_POST(self) -> None:  # noqa: N802
+        self.begin_request()
         path = self.strip_gateway_prefix(urlparse(self.path).path)
         try:
             body = self.read_json_body()
@@ -223,27 +273,120 @@ class RequestHandler(GatewayMixin, BaseHTTPRequestHandler):
             self.send_error_json(400, f"请求体解析失败: {exc}")
             return
 
-        rt = self.runtime
+        mg = self.manager
         try:
-            if path == "/api/config":
-                self.api_post(rt.save_config, body)
-            elif path == "/api/sync/trigger":
-                self.api_post(rt.trigger_sync)
-            elif path == "/api/sync/dry-run":
-                self.api_post(rt.start_dry_run)
-            elif path == "/api/auth/login":
-                self.api_post(rt.web_login)
-            elif path == "/api/auth/2fa":
-                code = str(body.get("code") or "")
-                self.api_post(rt.submit_2fa, code)
-            elif path == "/api/auth/import-curl":
-                self.api_post(rt.import_curl, str(body.get("curl") or ""))
+            if path == "/api/accounts":
+                self.api_post(mg.create_account, body)
+            elif path == "/api/settings":
+                self.api_post(mg.save_settings, body)
             elif path == "/api/photos_dirs/custom":
-                self.api_post(rt.add_custom_photos_dir, str(body.get("path") or ""))
+                self.api_post(mg.add_custom_photos_dir, str(body.get("path") or ""))
+            elif path.startswith("/api/accounts/"):
+                self.handle_account_post(path, body)
             else:
                 self.send_error_json(404, "Not Found")
+        except KeyError as exc:
+            self.send_error_json(404, str(exc.args[0] if exc.args else exc))
         except Exception as exc:
             self.send_error_json(500, f"内部错误: {exc}")
+
+    def do_PUT(self) -> None:  # noqa: N802
+        self.begin_request()
+        path = self.strip_gateway_prefix(urlparse(self.path).path)
+        try:
+            body = self.read_json_body()
+        except ValueError as exc:
+            self.send_error_json(400, str(exc))
+            return
+        except Exception as exc:
+            self.send_error_json(400, f"请求体解析失败: {exc}")
+            return
+
+        mg = self.manager
+        try:
+            if path == "/api/settings":
+                self.api_post(mg.save_settings, body)
+            else:
+                m = _ACCOUNT_PATH_RE.match(path)
+                if m and not m.group(2):
+                    self.api_post(mg.update_account, m.group(1), body)
+                else:
+                    self.send_error_json(404, "Not Found")
+        except KeyError as exc:
+            self.send_error_json(404, str(exc.args[0] if exc.args else exc))
+        except Exception as exc:
+            self.send_error_json(500, f"内部错误: {exc}")
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self.begin_request()
+        path = self.strip_gateway_prefix(urlparse(self.path).path)
+        try:
+            m = _ACCOUNT_PATH_RE.match(path)
+            if m and not m.group(2):
+                self.api_post(self.manager.delete_account, m.group(1))
+            else:
+                self.send_error_json(404, "Not Found")
+        except KeyError as exc:
+            self.send_error_json(404, str(exc.args[0] if exc.args else exc))
+        except Exception as exc:
+            self.send_error_json(500, f"内部错误: {exc}")
+
+    # --- 账号级路由 ---
+
+    def handle_account_get(self, path: str, query: dict) -> None:
+        m = _ACCOUNT_PATH_RE.match(path)
+        if not m:
+            self.send_error_json(404, "Not Found")
+            return
+        acct, action = m.group(1), m.group(2) or ""
+        mg = self.manager
+        if action == "":
+            self.api_get(lambda: mg.get_account(acct), wrap_key="account")
+        elif action == "status":
+            self.api_get(lambda: mg.account_status(acct), wrap_key="status")
+        elif action == "auth/status":
+            self.api_get(lambda: mg.account_auth_status(acct), wrap_key="auth")
+        elif action == "albums":
+            self.api_get(lambda: mg.list_albums(acct), wrap_key="albums")
+        elif action == "logs":
+            lines = int(query.get("lines", ["200"])[0])
+            self.send_json_response(200, {"success": True, "lines": mg.tail_logs(acct, lines)})
+        elif action == "sync/dry-run":
+            self.send_json_response(200, {"success": True, "dry_run": mg.dry_run_status(acct)})
+        else:
+            self.send_error_json(404, "Not Found")
+
+    def handle_account_post(self, path: str, body: dict) -> None:
+        m = _ACCOUNT_PATH_RE.match(path)
+        if not m:
+            self.send_error_json(404, "Not Found")
+            return
+        acct, action = m.group(1), m.group(2) or ""
+        mg = self.manager
+        if action == "enable":
+            self.api_post(mg.set_account_enabled, acct, bool(body.get("enabled", True)))
+        elif action == "disable":
+            self.api_post(mg.set_account_enabled, acct, False)
+        elif action == "sync/trigger":
+            self.api_post(mg.trigger_sync, acct)
+        elif action == "sync/dry-run":
+            self.api_post(mg.start_dry_run, acct)
+        elif action == "auth/login":
+            self.api_post(mg.web_login, acct)
+        elif action == "auth/2fa":
+            self.api_post(mg.submit_2fa, acct, str(body.get("code") or ""))
+        elif action == "auth/import-curl":
+            self.api_post(mg.import_curl, acct, str(body.get("curl") or ""))
+        else:
+            self.send_error_json(404, "Not Found")
+
+    def handle_auth_error(self, exc: Exception) -> None:
+        """登录态/凭据类错误 → 409，前端据此提示先完成认证。"""
+        self.send_json_response(409, {
+            "success": False,
+            "status": "auth_expired",
+            "error": f"登录态无效：{exc}（请先在「认证与安全」登录或导入 cURL）",
+        })
 
     # --- API 结果包装 ---
 
@@ -268,19 +411,11 @@ class RequestHandler(GatewayMixin, BaseHTTPRequestHandler):
     # --- 健康检查 ---
 
     def handle_health(self) -> None:
-        daemon_alive = bool(
-            self.runtime
-            and self.runtime._daemon_thread
-            and self.runtime._daemon_thread.is_alive()
-        )
-        self.send_json_response(200, {
-            "success": True,
-            "status": "ok" if daemon_alive else "degraded",
-            "app": APP_NAME,
-            "version": APP_VERSION,
-            "daemon_running": daemon_alive,
-            "uptime_sec": round(time.time() - self.runtime.started_at, 1) if self.runtime else 0,
-        })
+        health = self.manager.service_health() if self.manager else {
+            "success": True, "status": "degraded", "app": APP_NAME,
+            "version": APP_VERSION, "daemon_running": False, "uptime_sec": 0,
+        }
+        self.send_json_response(200, health)
 
     # --- 静态文件服务 ---
 
@@ -388,8 +523,8 @@ def main() -> None:
     RequestHandler.gateway_prefix = gateway_prefix
     RequestHandler.static_dir = static_dir
 
-    runtime = AppRuntime(Path(pkgvar))
-    RequestHandler.runtime = runtime
+    manager = SchedulerManager(Path(pkgvar))
+    RequestHandler.manager = manager
 
     stop_event = threading.Event()
 
@@ -436,7 +571,7 @@ def main() -> None:
                     os.unlink(socket_path)
             except OSError:
                 pass
-        runtime.stop()
+        manager.stop()
         print("[serve] stopped", flush=True)
 
 
