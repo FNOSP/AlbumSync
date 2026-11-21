@@ -87,7 +87,7 @@ class TestArchive(unittest.TestCase):
 
         self.assertEqual(backup_pkg.load_secrets_from_archive(files),
                          {"acc-huawei-abc123": "pw-secret"})
-        sessions = backup_pkg.collect_session_files(files, "acc-huawei-abc123")
+        sessions = backup_pkg.collect_session_files(files, "huawei", "acc-huawei-abc123")
         self.assertEqual(set(sessions), {"auth.json", "cas_state.json"})
         self.assertNotIn("accounts/acc-huawei-abc123/state.db", files)
 
@@ -105,7 +105,8 @@ class TestArchive(unittest.TestCase):
         blob = backup_pkg.seal_container(archive, PASS, _m)
         _h, decrypted = backup_pkg.open_container(blob, PASS)
         files = backup_pkg.parse_archive(decrypted)
-        self.assertEqual(backup_pkg.collect_session_files(files, "acc-huawei-abc123"), {})
+        self.assertEqual(
+            backup_pkg.collect_session_files(files, "huawei", "acc-huawei-abc123"), {})
 
     def test_account_filter(self):
         with self.assertRaises(backup_pkg.BackupError):
@@ -149,6 +150,48 @@ class TestArchive(unittest.TestCase):
     def test_missing_config_rejected(self):
         with self.assertRaises(backup_pkg.BackupError):
             backup_pkg.load_config_from_archive({})
+
+    def test_xiaomi_session_files_included(self):
+        """小米会话文件 xiaomi_{id}_auth.json 必须随备份包迁移（平台清单来自注册表）。"""
+        acc_id = "acc-xiaomi-xyz789"
+        acc_dir = self.tmp / "accounts" / acc_id
+        acc_dir.mkdir(parents=True)
+        (acc_dir / f"xiaomi_{acc_id}_auth.json").write_text(
+            '{"platform": "xiaomi", "cookies": {"userId": "1"}}', encoding="utf-8"
+        )
+        account = _account(acc_id=acc_id, password="")
+        account["platform"] = "xiaomi"
+        archive, manifest = self._build(accounts=[account])
+        self.assertTrue(manifest["accounts"][0]["has_sessions"])
+        blob = backup_pkg.seal_container(archive, PASS, manifest)
+        _h, decrypted = backup_pkg.open_container(blob, PASS)
+        files = backup_pkg.parse_archive(decrypted)
+        sessions = backup_pkg.collect_session_files(files, "xiaomi", acc_id)
+        self.assertEqual(sessions, {f"xiaomi_{acc_id}_auth.json": files[f"accounts/{acc_id}/xiaomi_{acc_id}_auth.json"]})
+
+    def test_icloud_session_files_included(self):
+        """iCloud session JSON 与 cookie jar 必须一起随 .asbak 迁移。"""
+        acc_id = "acc-icloud-xyz789"
+        acc_dir = self.tmp / "accounts" / acc_id
+        acc_dir.mkdir(parents=True)
+        names = {f"icloud_{acc_id}_session.json", f"icloud_{acc_id}_cookies.lwp"}
+        (acc_dir / f"icloud_{acc_id}_session.json").write_text(
+            '{"platform": "icloud", "apple_id": "user@example.com"}', encoding="utf-8"
+        )
+        (acc_dir / f"icloud_{acc_id}_cookies.lwp").write_text(
+            "#LWP-Cookies-2.0\n", encoding="utf-8"
+        )
+        account = _account(acc_id=acc_id)
+        account["platform"] = "icloud"
+        archive, manifest = self._build(accounts=[account])
+        self.assertTrue(manifest["accounts"][0]["has_sessions"])
+        blob = backup_pkg.seal_container(archive, PASS, manifest)
+        _h, decrypted = backup_pkg.open_container(blob, PASS)
+        files = backup_pkg.parse_archive(decrypted)
+        sessions = backup_pkg.collect_session_files(files, "icloud", acc_id)
+        self.assertEqual(set(sessions), names)
+        for name in names:
+            self.assertEqual(sessions[name], files[f"accounts/{acc_id}/{name}"])
 
 
 class TestBackupApi(unittest.TestCase):

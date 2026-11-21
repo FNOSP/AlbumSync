@@ -20,15 +20,30 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import crypto_box as cb
+from providers import get_platform_spec
 
 BACKUP_MAGIC = b"ASBK1"
 BACKUP_SCHEMA = 1
 MAX_CONTAINER_BYTES = 16 * 1024 * 1024
 
-# 每账号需要备份的会话文件（存在才打包）
-SESSION_FILES = ("auth.json", "curl.txt.imported", "cas_cookies.lwp", "cas_state.json")
+# 未知平台回退清单（历史华为会话文件；正常路径不会走到——账号平台创建时已校验）
+LEGACY_SESSION_FILES = ("auth.json", "curl.txt.imported", "cas_cookies.lwp", "cas_state.json")
 # manifest 与 secrets 为保留名，不允许作为账号文件名
 RESERVED_NAMES = {"manifest.json", "config.json", "secrets.json"}
+
+
+def session_file_names(platform: str, account_id: str) -> tuple[str, ...]:
+    """按账号平台返回需随备份包迁移的会话文件清单。
+
+    清单由各平台在 providers 注册表（PlatformSpec.session_files）声明，
+    本模块不感知平台差异（如小米 xiaomi_{id}_auth.json）。
+    """
+    try:
+        spec = get_platform_spec(platform)
+    except ValueError:
+        return LEGACY_SESSION_FILES
+    files = spec.session_files
+    return files(str(account_id or "")) if files else LEGACY_SESSION_FILES
 
 
 class BackupError(Exception):
@@ -78,7 +93,8 @@ def build_archive(*, pkgvar: Path, settings: dict[str, Any],
             has_sessions = False
             if include_sessions:
                 acc_dir = pkgvar / "accounts" / acc_id
-                for name in SESSION_FILES:
+                platform = str(account.get("platform") or "huawei")
+                for name in session_file_names(platform, acc_id):
                     src = acc_dir / name
                     if not src.is_file():
                         continue
@@ -222,13 +238,16 @@ def load_secrets_from_archive(files: dict[str, bytes]) -> dict[str, str]:
     return {str(k): str(v) for k, v in data.items()}
 
 
-def collect_session_files(files: dict[str, bytes], account_id: str) -> dict[str, bytes]:
+def collect_session_files(files: dict[str, bytes], platform: str,
+                          account_id: str) -> dict[str, bytes]:
+    """按平台会话清单从备份包内容中取出该账号的会话文件。"""
     prefix = f"accounts/{account_id}/"
+    names = set(session_file_names(platform, account_id))
     out: dict[str, bytes] = {}
     for name, data in files.items():
         if not name.startswith(prefix):
             continue
         base = name[len(prefix):]
-        if base in SESSION_FILES:
+        if base in names:
             out[base] = data
     return out

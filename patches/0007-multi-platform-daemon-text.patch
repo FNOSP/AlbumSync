@@ -1,0 +1,166 @@
+diff --git a/hwcloudpd/daemon.py b/hwcloudpd/daemon.py
+--- a/hwcloudpd/daemon.py
++++ b/hwcloudpd/daemon.py
+@@ -10,13 +10,12 @@
+ from pathlib import Path
+ import random
+ import signal
++import sqlite3
+ import time
+-from typing import Callable
++from typing import Any, Callable
+ from zoneinfo import ZoneInfo
+ 
+ from hwcloudpd.auth import AuthManager
+-from hwcloudpd.cas_auth import HuaweiCasAuthenticator
+-from hwcloudpd.client import HuaweiGalleryClient
+ from hwcloudpd.cron import CronSchedule
+ from hwcloudpd.models import (
+     AuthExpiredError,
+@@ -40,13 +39,15 @@
+         self,
+         config: SyncConfig,
+         auth_manager: AuthManager,
+-        client: HuaweiGalleryClient,
++        client: Any,  # PhotoProvider 实现（鸭子类型；华为=HuaweiGalleryClient）
+         store: StateStore,
+         notifier: Notifier,
+         *,
+-        authenticator: HuaweiCasAuthenticator | None = None,
++        authenticator: Any | None = None,  # 自动重登认证器；不支持的平台为 None
+         engine_factory: Callable[[], SyncEngine] | None = None,
+         auto_relogin_cooldown_sec: float = 1800.0,
++        platform_label: str = "",
++        auth_recovery_hint: str = "",
+     ) -> None:
+         self.config = config
+         self.auth_manager = auth_manager
+@@ -54,6 +55,9 @@
+         self.store = store
+         self.notifier = notifier
+         self.authenticator = authenticator
++        # 平台显示名与恢复指引由账号平台注入（providers），通知文案不再硬编码华为
++        self.platform_label = str(platform_label or "").strip() or "云相册"
++        self.auth_recovery_hint = str(auth_recovery_hint or "").strip()
+         self._engine_factory = engine_factory or (
+             lambda: SyncEngine(self.config, self.client, self.store)
+         )
+@@ -125,7 +129,7 @@
+         self,
+         reason: str,
+         *,
+-        notify_title: str = "华为云空间登录态失效",
++        notify_title: str | None = None,
+         notify_msg: str | None = None,
+     ) -> None:
+         self._auth_valid = False
+@@ -133,18 +137,20 @@
+         self._last_error = reason
+         self.write_health()
+         logger.warning(
+-            "Huawei Cloud session unavailable/expired: %s. "
+-            "Run `docker exec -it hwcloudpd hwcloudpd --auth-only` (or update %s / %s); daemon will recover automatically.",
++            "%s session unavailable/expired: %s. Restore the session (re-import "
++            "credentials or re-login); daemon will recover automatically.",
++            self.platform_label,
+             reason,
+-            self.auth_manager.curl_file,
+-            self.auth_manager.auth_file,
+         )
+-        default_msg = (
+-            f"{reason}。若已配置 HUAWEI_USERNAME/HUAWEI_PASSWORD 请执行 "
+-            "`docker exec -it hwcloudpd hwcloudpd --auth-only` 输入二次验证码；"
+-            "或从浏览器 Copy as cURL 覆盖写入 config/curl.txt，容器将自动热恢复。"
++        if notify_msg:
++            default_msg = notify_msg
++        elif self.auth_recovery_hint:
++            default_msg = f"{reason}。{self.auth_recovery_hint}"
++        else:
++            default_msg = f"{reason}。请在「认证与安全」重新导入登录态后自动恢复。"
++        self.notifier.notify(
++            "auth_expired", notify_title or f"{self.platform_label}登录态失效", default_msg
+         )
+-        self.notifier.notify("auth_expired", notify_title, notify_msg or default_msg)
+ 
+     async def _try_silent_auto_relogin(self) -> bool:
+         if (
+@@ -176,23 +182,23 @@
+             self._credentials_rejected = True
+             await self._handle_auth_expired(
+                 str(exc),
+-                notify_title="华为账号或密码错误",
+-                notify_msg=f"{exc}。已停止自动登录重试以防账号锁定，请修正环境变量 HUAWEI_USERNAME / HUAWEI_PASSWORD 后重启容器。",
++                notify_title=f"{self.platform_label}账号或密码错误",
++                notify_msg=f"{exc}。已停止自动登录重试以防账号锁定，请在「同步设置」修正账号密码后重启应用。",
+             )
+             return False
+         except TwoFactorRequiredError as exc:
+             self._auto_relogin_blocked_until = time.monotonic() + self._auto_relogin_cooldown_sec
+             await self._handle_auth_expired(
+                 str(exc),
+-                notify_title="华为云空间需要二次验证",
+-                notify_msg=f"{exc}。请在宿主机终端执行：`docker exec -it hwcloudpd hwcloudpd --auth-only` 完成二次验证并勾选信任此浏览器。",
++                notify_title=f"{self.platform_label}需要二次验证",
++                notify_msg=f"{exc}。请在「认证与安全」完成二次验证并勾选信任设备，之后将自动恢复。",
+             )
+             return False
+         except CaptchaRequiredError as exc:
+             self._auto_relogin_blocked_until = time.monotonic() + self._auto_relogin_cooldown_sec
+             await self._handle_auth_expired(
+                 str(exc),
+-                notify_title="华为云空间触发人机验证",
++                notify_title=f"{self.platform_label}触发人机验证",
+                 notify_msg=str(exc),
+             )
+             return False
+@@ -249,7 +255,7 @@
+             return self._auth_valid
+ 
+     async def keepalive_loop(self) -> None:
+-        """Background loop keeping Huawei Cloud CASTGC/CSRFToken active."""
++        """Background loop keeping the platform session (cookies/tokens) active."""
+         while not self._stop_event.is_set():
+             healthy = await self.keepalive_step()
+             if healthy:
+@@ -288,13 +294,19 @@
+             except AuthExpiredError as exc:
+                 await self._handle_auth_expired(str(exc))
+                 return None
++            except sqlite3.ProgrammingError as exc:
++                # 账号停止/热重载后残留线程触碰已关闭的 state.db（停止语义：
++                # 5s 后不再等待同步周期跑完，0.1.7）——WAL 原子提交数据无损，
++                # 属预期中止：降噪为 INFO，不写健康、不通知、不留裸 traceback（T31.9）
++                logger.info("Sync aborted after account stop: %s", exc)
++                return None
+             except Exception as exc:
+                 self._last_error = str(exc)
+                 self.write_health()
+                 logger.exception("Sync run failed: %s", exc)
+                 self.notifier.notify(
+                     "sync_error",
+-                    "华为云空间同步异常",
++                    f"{self.platform_label}同步异常",
+                     f"同步执行失败: {exc}",
+                 )
+                 return None
+diff --git a/hwcloudpd/sync.py b/hwcloudpd/sync.py
+--- a/hwcloudpd/sync.py
++++ b/hwcloudpd/sync.py
+@@ -374,7 +374,7 @@
+         return target_path
+ 
+     def _run_auto_delete(self, report: SyncReport) -> None:
+-        """Delete local files that were moved into Huawei Cloud Recycle Bin (`default-album-3`)."""
++        """Delete local files that were moved into the cloud Recycle Bin (`default-album-3`)."""
+         is_dry = self.config.dry_run or self.config.only_print_filenames
+         for page in self.client.iter_simple_files(
+             "default-album-3",
+@@ -446,7 +446,7 @@
+         for item in candidates:
+             self.store.mark_deleted_cloud(item.unique_id)
+         report.deleted_cloud += deleted
+-        logger.info("Moved %d backed-up items to Huawei Cloud Recycle Bin", deleted)
++        logger.info("Moved %d backed-up items to cloud Recycle Bin", deleted)
+ 
+     def run_once(self, *, force_full_scan: bool = False) -> SyncReport:
+         """Execute a complete synchronization pass and return a SyncReport."""

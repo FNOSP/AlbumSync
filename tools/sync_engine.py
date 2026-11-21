@@ -12,6 +12,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -48,32 +49,46 @@ def sync(check: bool = False) -> int:
         return 0
 
     # 覆盖式复制（不整树删除，避免污染回收站；引擎极少删文件，残留可忽略）
-    shutil.copytree(ENGINE_SRC, DEST, dirs_exist_ok=True)
-    # 应用补丁：自动探测 strip 级别（patch1 为 a/src/hwcloudpd/... 需 -p3；
-    # patch2 为 a/hwcloudpd/... 需 -p2），以 --check 试探后真实应用
-    for patch in sorted(PATCHES_DIR.glob("*.patch")):
-        chosen = None
-        last_err = ""
-        for strip in (3, 2, 1):
-            probe = subprocess.run(
-                ["git", "apply", f"-p{strip}", "--check", str(patch)],
-                cwd=DEST, capture_output=True, text=True,
+    # T28.3：drvfs(/mnt/e) 上 git apply 存在 mmap/9p 写缓存不一致问题——
+    # 补丁「应用成功」但内容不落盘（daemon.py/cas_auth.py 实测复现）。
+    # 因此补丁链先在 ext4 中转目录重放，验证通过后整体拷回 DEST。
+    with tempfile.TemporaryDirectory(prefix="albumsync-sync-") as td:
+        staging = Path(td) / "hwcloudpd"
+        shutil.copytree(ENGINE_SRC, staging, dirs_exist_ok=True)
+        # 应用补丁：自动探测 strip 级别（patch1 为 a/src/hwcloudpd/... 需 -p3；
+        # patch2 为 a/hwcloudpd/... 需 -p2），以 --check 试探后真实应用
+        for patch in sorted(PATCHES_DIR.glob("*.patch")):
+            chosen = None
+            last_err = ""
+            for strip in (3, 2, 1):
+                probe = subprocess.run(
+                    ["git", "apply", f"-p{strip}", "--check", str(patch)],
+                    cwd=staging, capture_output=True, text=True,
+                )
+                if probe.returncode == 0:
+                    chosen = strip
+                    break
+                last_err = probe.stderr.strip()
+            if chosen is None:
+                print(f"[ERROR] 应用补丁失败 {patch.name}:\n{last_err}")
+                return 1
+            result = subprocess.run(
+                ["git", "apply", f"-p{chosen}", str(patch)],
+                cwd=staging, capture_output=True, text=True,
             )
-            if probe.returncode == 0:
-                chosen = strip
-                break
-            last_err = probe.stderr.strip()
-        if chosen is None:
-            print(f"[ERROR] 应用补丁失败 {patch.name}:\n{last_err}")
-            return 1
-        result = subprocess.run(
-            ["git", "apply", f"-p{chosen}", str(patch)],
-            cwd=DEST, capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            print(f"[ERROR] 应用补丁失败 {patch.name}:\n{result.stdout}\n{result.stderr}")
-            return 1
-        print(f"[OK] 已应用补丁 {patch.name} (-p{chosen})")
+            if result.returncode != 0:
+                print(f"[ERROR] 应用补丁失败 {patch.name}:\n{result.stdout}\n{result.stderr}")
+                return 1
+            print(f"[OK] 已应用补丁 {patch.name} (-p{chosen})")
+
+        # 中转目录 → DEST：逐文件覆盖（行为等价于 copytree dirs_exist_ok）
+        for f in sorted(staging.rglob("*")):
+            target = DEST / f.relative_to(staging)
+            if f.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, target)
 
     count = sum(1 for _ in DEST.rglob("*.py"))
     print(f"[DONE] 引擎已同步 {count} 个 .py 到 {DEST}")

@@ -10,7 +10,7 @@ PLATFORMS[platform] = PlatformSpec(能力声明 + provider/strategy 工厂)。
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from hwcloudpd.auth import AuthManager
 from providers.base import (
@@ -27,6 +27,13 @@ from providers.huawei import (
     make_huawei_auth_strategy,
     make_huawei_provider,
 )
+from providers.icloud import (
+    ICLOUD_CAPABILITIES,
+    ICloudAuthStrategy,
+    ICloudProvider,
+    make_icloud_auth_strategy,
+    make_icloud_provider,
+)
 from providers.xiaomi import (
     XIAOMI_CAPABILITIES,
     XiaomiAuthStrategy,
@@ -38,13 +45,17 @@ from providers.xiaomi import (
 
 @dataclass(frozen=True)
 class PlatformSpec:
-    """平台规格：能力声明 + 工厂。"""
+    """平台规格：能力声明 + 工厂 + 平台元数据。"""
 
     platform: str
     display_name: str
     capabilities: ProviderCapabilities
     provider_factory: ProviderFactory
     auth_strategy_factory: AuthStrategyFactory
+    # 需要随凭据备份包（.asbak）迁移的会话文件清单，参数为账号 id。
+    # 平台会话文件名差异（如华为 auth.json / 小米 xiaomi_{id}_auth.json）
+    # 由各平台在此声明，backup.py 按账号平台查询（平台内容不外泄通用层）。
+    session_files: Callable[[str], tuple[str, ...]] | None = None
 
     def create_provider(self, auth_manager: AuthManager,
                         account: dict[str, Any] | None = None) -> PhotoProvider:
@@ -59,6 +70,20 @@ class PlatformSpec:
         return self.auth_strategy_factory(auth_manager, account)
 
 
+# 各平台会话文件清单（backup.py 打包/导入时按账号平台查询）
+def _huawei_session_files(_account_id: str) -> tuple[str, ...]:
+    return ("auth.json", "curl.txt.imported", "cas_cookies.lwp", "cas_state.json")
+
+
+def _xiaomi_session_files(account_id: str) -> tuple[str, ...]:
+    return (f"xiaomi_{account_id or 'default'}_auth.json",)
+
+
+def _icloud_session_files(account_id: str) -> tuple[str, ...]:
+    suffix = account_id or "default"
+    return (f"icloud_{suffix}_session.json", f"icloud_{suffix}_cookies.lwp")
+
+
 PLATFORMS: dict[str, PlatformSpec] = {
     "huawei": PlatformSpec(
         platform="huawei",
@@ -66,6 +91,7 @@ PLATFORMS: dict[str, PlatformSpec] = {
         capabilities=HUAWEI_CAPABILITIES,
         provider_factory=make_huawei_provider,
         auth_strategy_factory=make_huawei_auth_strategy,
+        session_files=_huawei_session_files,
     ),
     "xiaomi": PlatformSpec(
         platform="xiaomi",
@@ -73,6 +99,15 @@ PLATFORMS: dict[str, PlatformSpec] = {
         capabilities=XIAOMI_CAPABILITIES,
         provider_factory=make_xiaomi_provider,
         auth_strategy_factory=make_xiaomi_auth_strategy,
+        session_files=_xiaomi_session_files,
+    ),
+    "icloud": PlatformSpec(
+        platform="icloud",
+        display_name="iCloud 云相册",
+        capabilities=ICLOUD_CAPABILITIES,
+        provider_factory=make_icloud_provider,
+        auth_strategy_factory=make_icloud_auth_strategy,
+        session_files=_icloud_session_files,
     ),
 }
 
@@ -105,6 +140,8 @@ __all__ = [
     "HuaweiAuthStrategy",
     "XiaomiProvider",
     "XiaomiAuthStrategy",
+    "ICloudProvider",
+    "ICloudAuthStrategy",
     "get_platform_spec",
     "known_platforms",
 ]

@@ -1,0 +1,33 @@
+{
+  "upstream": {
+    "project": "icloud_photos_downloader",
+    "repository": "https://github.com/icloud-photos-downloader/icloud_photos_downloader",
+    "tag": "v1.33.1",
+    "commit": "33805aea4cc212f26b1298951c2abf553c0acab2",
+    "license": "MIT",
+    "copied_paths": [
+      "src/pyicloud_ipd (excluding cmdline.py)",
+      "src/foundation",
+      "src/icloudpd/__init__.py",
+      "src/icloudpd/paths.py"
+    ]
+  },
+  "local_patches": [
+    "pyicloud_ipd/utils.py: remove unused keyring integration and CLI-only helpers",
+    "pyicloud_ipd/session.py: write session JSON and LWP cookies via 0600 temporary files followed by atomic replace"
+  ],
+  "dependencies": {
+    "requests": "2.32.5",
+    "urllib3": "2.6.3",
+    "certifi": "2026.10.23",
+    "idna": "3.20",
+    "charset-normalizer": "3.4.4 (pure Python source)",
+    "typing_extensions": "4.16.0",
+    "pytz": "2026.6",
+    "tzlocal": "5.3.1",
+    "tzdata": "2026.6",
+    "srp": "1.0.22",
+    "six": "1.17.0"
+  },
+  "notes": "The v1.33.1 pyproject requests pin is not published on PyPI; requests 2.32.5 and compatible stable dependencies are vendored instead. No runtime package installation is performed."
+}

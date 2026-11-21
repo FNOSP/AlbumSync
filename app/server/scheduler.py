@@ -386,6 +386,12 @@ class SchedulerManager:
     def import_curl(self, account_id: str, curl_text: str) -> dict[str, Any]:
         return self._require_runtime(account_id).import_curl(curl_text)
 
+    def start_qr_login(self, account_id: str) -> dict[str, Any]:
+        return self._require_runtime(account_id).start_qr_login()
+
+    def qr_login_status(self, account_id: str) -> dict[str, Any]:
+        return self._require_runtime(account_id).qr_login_status()
+
     def list_albums(self, account_id: str) -> list[dict[str, Any]]:
         return self._require_runtime(account_id).list_albums()
 
@@ -679,14 +685,17 @@ class SchedulerManager:
             if not isinstance(acc, dict):
                 continue
             acc_id = str(acc.get("id") or "")
+            acc_platform = str(acc.get("platform") or "huawei")
             accounts.append({
                 "id": acc_id,
-                "platform": acc.get("platform") or "huawei",
+                "platform": acc_platform,
                 "name": acc.get("name") or acc_id,
                 "username": acc.get("username") or "",
                 "conflict": acc_id in existing,
                 "has_password": bool(secrets_map.get(acc_id)),
-                "sessions": sorted(backup_pkg.collect_session_files(files, acc_id).keys()),
+                "sessions": sorted(
+                    backup_pkg.collect_session_files(files, acc_platform, acc_id).keys()
+                ),
             })
         return {
             "status": "ok",
@@ -747,7 +756,7 @@ class SchedulerManager:
 
             # 会话文件先落盘，再写配置，最后整体热重载
             for account in incoming:
-                self._restore_session_files(files, account["id"])
+                self._restore_session_files(files, account)
             cfg["accounts"] = final
             try:
                 self._persist(cfg)
@@ -768,11 +777,14 @@ class SchedulerManager:
             "accounts": restored,
         }
 
-    def _restore_session_files(self, files: dict[str, bytes], account_id: str) -> None:
-        sessions = backup_pkg.collect_session_files(files, account_id)
+    def _restore_session_files(self, files: dict[str, bytes], account: dict[str, Any]) -> None:
+        acc_id = str(account.get("id") or "")
+        sessions = backup_pkg.collect_session_files(
+            files, str(account.get("platform") or "huawei"), acc_id
+        )
         if not sessions:
             return
-        acc_dir = self.pkgvar / "accounts" / account_id
+        acc_dir = self.pkgvar / "accounts" / acc_id
         acc_dir.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(acc_dir, 0o700)

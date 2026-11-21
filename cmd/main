@@ -6,7 +6,7 @@ PID_FILE="${TRIM_PKGVAR}/app.pid"
 APP_SRC_DIR="${TRIM_APPDEST}/server"
 
 # 引擎需要 Python >= 3.11（fnOS 通过 install_dep_apps 提供 python 3.11）
-# 纯标准库实现，无需 venv / pip
+# iCloud 协议及其纯 Python 依赖已随包 vendor，无需 venv / pip 或联网安装
 find_python() {
   for candidate in \
     /usr/bin/python3.11 \

@@ -85,6 +85,7 @@ DEFAULT_ACCOUNT: dict[str, Any] = {
     "name": "",                     # 展示名
     "username": "",
     "password": "",
+    "domain": "com",                # iCloud 区域：com 国际区 | cn 中国区
     "photos_dir": "",               # 空 = pkgvar/photos/<id>/
     "folder_structure": "{:%Y/%m/%d}",
     "albums": [],
@@ -129,7 +130,7 @@ _ACCOUNT_BOOL_KEYS = (
     "delete_after_download", "run_on_startup",
 )
 _ACCOUNT_STR_KEYS = (
-    "id", "owner", "platform", "name", "username", "password", "photos_dir",
+    "id", "owner", "platform", "name", "username", "password", "domain", "photos_dir",
     "folder_structure", "photo_size", "file_match_policy",
     "live_photo_mov_filename_policy", "webhook_url", "telegram_chat_id",
     "notification_script",
@@ -286,6 +287,11 @@ def validate_account(data: dict[str, Any], tz: str | None = None) -> str | None:
             get_platform_spec(str(data["platform"]))
         except ValueError as exc:
             return str(exc)
+    if str(data.get("platform") or "").strip().lower() == "icloud":
+        domain = str(data.get("domain") or "com").strip().lower()
+        if domain not in ("com", "cn"):
+            return "domain 仅支持 com（国际区）/ cn（中国区）"
+        data["domain"] = domain
 
     tz = str(tz or DEFAULT_SETTINGS["timezone"])
     cron = data.get("cron")
@@ -815,6 +821,14 @@ class AccountRuntime:
             sync_cfg.auto_delete = False
             logger.info("account %s: auto_delete disabled (platform %s lacks delete support)",
                         self.account_id, caps.platform)
+        if not caps.supports_delete and sync_cfg.delete_after_download:
+            sync_cfg.delete_after_download = False
+            logger.info("account %s: delete_after_download disabled (platform %s lacks delete support)",
+                        self.account_id, caps.platform)
+        if not caps.supports_delete and sync_cfg.keep_cloud_recent_days is not None:
+            sync_cfg.keep_cloud_recent_days = None
+            logger.info("account %s: keep_cloud_recent_days disabled (platform %s lacks delete support)",
+                        self.account_id, caps.platform)
         if not caps.supports_favorites_filter and sync_cfg.only_favorites:
             sync_cfg.only_favorites = False
             logger.info("account %s: only_favorites disabled (platform %s lacks favorites filter)",
@@ -845,6 +859,9 @@ class AccountRuntime:
             sync_cfg, self.auth_manager, self.client, self.store, self.notifier,
             authenticator=daemon_auth if daemon_auth.can_attempt_login else None,
             engine_factory=engine_factory,
+            # 平台元数据下沉：通知标题/恢复指引随账号平台走，不再硬编码华为
+            platform_label=self.platform_spec.capabilities.display_name,
+            auth_recovery_hint=self.strategy.auth_recovery_hint,
         )
         daemon.write_health()
         thread = threading.Thread(
@@ -956,40 +973,32 @@ class AccountRuntime:
                 session = self.strategy.get_session_if_present()
             except Exception as exc:
                 logger.warning("get_session_if_present failed: %s", exc)
-            # 防御：非华为平台（小米）无 cas_probe → 用 hasattr 兜底
-            if hasattr(self.strategy, "cas_probe"):
-                try:
-                    probe = self.strategy.cas_probe()
-                except Exception as exc:
-                    logger.warning("cas_probe failed: %s", exc)
-                    probe = {"pending_2fa": None, "has_cas_tgt": False, "credentials_configured": False}
-            else:
+            # 平台认证探针与会话字段提取均由 strategy 提供（BaseAuthStrategy
+            # 契约），通用层不再探测平台会话模型——平台差异全部下沉到 provider。
+            try:
+                probe = self.strategy.auth_probe()
+            except Exception as exc:
+                logger.warning("auth_probe failed: %s", exc)
                 probe = {"pending_2fa": None, "has_cas_tgt": False,
                          "credentials_configured": self.strategy.has_credentials()}
-            pending = probe["pending_2fa"]
-            # 防御：session 可能是 XiaomiClient 实例（无 .user_id/.cookies/.updated_at 属性）
-            user_id = ""
-            login_sec_level = None
-            session_updated_at = None
+            info = {"user_id": "", "login_sec_level": None, "session_updated_at": None}
             if session is not None:
-                user_id = getattr(session, "user_id", "") or getattr(session, "account_id", "") or ""
-                cookies = getattr(session, "cookies", None)
-                if isinstance(cookies, dict):
-                    login_sec_level = cookies.get("loginSecLevel")
-                cookie_obj = getattr(session, "cookiejar", None)
-                if cookie_obj is not None and hasattr(cookie_obj, "__iter__"):
-                    for c in cookie_obj:
-                        if c.name == "userId":
-                            user_id = user_id or c.value
-                            break
-                session_updated_at = getattr(session, "updated_at", None)
+                try:
+                    info.update(self.strategy.session_info(session))
+                except Exception as exc:
+                    logger.warning("session_info failed: %s", exc)
+            pending = probe.get("pending_2fa")
+            # 风控状态（T31.10）：会话在时由 session_info 带出；不在时走
+            # strategy.risk_state()（限流可能在会话失效期间被记录）
+            risk = info.get("risk") or self.strategy.risk_state()
             return {
                 "has_session": session is not None,
-                "user_id": user_id,
-                "login_sec_level": login_sec_level,
-                "session_updated_at": session_updated_at,
-                "has_cas_tgt": probe["has_cas_tgt"],
-                "credentials_configured": probe["credentials_configured"],
+                "user_id": info["user_id"],
+                "login_sec_level": info["login_sec_level"],
+                "session_updated_at": info["session_updated_at"],
+                "has_cas_tgt": bool(probe.get("has_cas_tgt")),
+                "credentials_configured": bool(probe.get("credentials_configured")),
+                "risk": risk,
                 "pending_2fa": (
                     {
                         "flow": pending.get("flow"),
@@ -1008,7 +1017,7 @@ class AccountRuntime:
         daemon, thread = self._daemon, self._daemon_thread
         if not (daemon and thread and thread.is_alive()):
             return {"status": "error", "message": "同步守护进程未运行，请重启应用"}
-        daemon._immediate_sync_event.set()
+        daemon.request_immediate_sync()
         return {"status": "ok", "message": "已触发立即同步（登录态有效后自动执行）"}
 
     def start_dry_run(self) -> dict[str, Any]:
@@ -1073,9 +1082,9 @@ class AccountRuntime:
         lines: list[str] = []
         try:
             if not self.strategy.has_credentials():
-                return {"status": "error", "message": "请先在「同步设置」中填写华为账号与密码"}
+                return {"status": "error", "message": self.strategy.credentials_hint}
             try:
-                session = self.strategy.web_login(output_fn=lines.append)
+                session = self.strategy.web_login(output_fn=lines.append, interactive=True)
             except TwoFactorRequiredError:
                 pending = self.strategy.pending_challenge()
                 return {
@@ -1128,7 +1137,7 @@ class AccountRuntime:
             return {"status": "error", "message": f"登录成功但会话校验失败: {exc}", "output": lines}
         return {
             "status": "ok",
-            "message": "登录成功（信任设备生效后，会话过期将静默自动重登）",
+            "message": self.strategy.login_success_hint,
             "user_id": getattr(session, "user_id", "") or "",
             "output": lines,
         }
@@ -1147,6 +1156,46 @@ class AccountRuntime:
                 "message": "cURL 会话导入成功（daemon 将在 15 秒内热重载并校验）",
                 "user_id": getattr(session, "user_id", "") or "",
             }
+
+    def import_longterm(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """小米 account 域长效票据导入（T36.5）：验证换发 + 落盘 + 开启免扫码模式。"""
+        data = payload if isinstance(payload, dict) else {}
+        if not data:
+            return {"status": "error", "message": "长效票据内容为空"}
+        with self._log_ctx():
+            try:
+                session = self.strategy.import_longterm(data)
+            except Exception as exc:
+                return {"status": "error", "message": f"长效会话导入失败: {exc}"}
+            state = self.strategy.longterm_state() or {}
+            return {
+                "status": "ok",
+                "message": "长效会话导入成功（passToken 已验证可换发，daemon 将自动静默续期）",
+                "user_id": getattr(session, "user_id", "") or "",
+                "rounds": state.get("rounds", 1),
+            }
+
+    def start_qr_login(self) -> dict[str, Any]:
+        """创建扫码票据（T31.3）。不支持的平台由 BaseAuthStrategy 默认实现返回 error。"""
+        with self._log_ctx():
+            try:
+                r = self.strategy.start_qr_login()
+            except Exception as exc:
+                return {"status": "error", "message": f"扫码票据创建失败: {exc}"}
+            if isinstance(r, dict) and r.get("status") == "error":
+                return r
+            result = {"status": "ok", **r}
+            if self.strategy.qr_login_hint:
+                result["message"] = self.strategy.qr_login_hint
+            return result
+
+    def qr_login_status(self) -> dict[str, Any]:
+        """扫码轮询状态机一步（lp 长轮询最长挂起 ~65s，T31.3）。"""
+        with self._log_ctx():
+            try:
+                return self.strategy.qr_login_status()
+            except Exception as exc:
+                return {"status": "failed", "error": f"扫码轮询异常: {exc}"}
 
     # ---------- 相册 ----------
 

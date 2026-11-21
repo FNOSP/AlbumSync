@@ -1,0 +1,43 @@
+diff --git a/hwcloudpd/client.py b/hwcloudpd/client.py
+--- a/hwcloudpd/client.py
++++ b/hwcloudpd/client.py
+@@ -12,7 +12,7 @@
+ import random
+ import ssl
+ import time
+-from typing import Any, Iterator, Protocol
++from typing import Any, Callable, Iterator, Protocol
+ import urllib.error
+ from urllib.parse import parse_qs, unquote, urlparse
+ import urllib.request
+@@ -335,6 +335,11 @@
+         self.base_url = base_url.rstrip("/")
+         self.max_retries = max_retries
+         self.retry_base_delay = retry_base_delay
++        # T28.7: optional response observer hook, off by default. The service
++        # layer may attach a callable(dict) for debugging / new-vendor reverse
++        # engineering; it receives {path, status, set_cookies, headers} for
++        # every API response (including error statuses).
++        self.response_observer: Callable[[dict], None] | None = None
+ 
+     def _build_api_headers(
+         self,
+@@ -418,6 +423,18 @@
+             # Always merge Set-Cookie / csrftoken rotation before inspecting errors.
+             self.auth_manager.update_from_response(resp.set_cookies, resp.headers)
+ 
++            # T28.7: response observer hook (no-op unless attached).
++            if self.response_observer is not None:
++                try:
++                    self.response_observer({
++                        "path": path,
++                        "status": resp.status,
++                        "set_cookies": dict(resp.set_cookies or {}),
++                        "headers": dict(resp.headers.items()),
++                    })
++                except Exception as obs_exc:
++                    logger.debug("response_observer failed: %s", obs_exc)
++
+             if resp.status in (301, 302, 303, 307, 308):
+                 loc = next(
+                     (v for k, v in resp.headers.items() if k.lower() == "location"),

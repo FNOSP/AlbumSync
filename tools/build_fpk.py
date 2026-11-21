@@ -23,6 +23,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 APP_DIR = PROJECT_ROOT / "app"
 FNPACK = PROJECT_ROOT / "tools" / "fnpack.exe"
 ENGINE_MARKERS = ("cas_auth.py", "daemon.py", "client.py")
+ICLOUD_MARKERS = (
+    "__init__.py",
+    "icloud_client.py",
+    "vendor/pyicloud_ipd/base.py",
+    "vendor/pyicloud_ipd/services/photos.py",
+    "vendor/foundation/__init__.py",
+    "vendor/requests/__init__.py",
+    "vendor/licenses/icloudpd-LICENSE.md",
+    "vendor/source.json",
+)
 
 # 运行时生成的用户数据/凭据，绝不能打进包里（FreePower 教训）
 RUNTIME_FILES = (
@@ -61,11 +71,27 @@ def precheck() -> int:
     cas = (engine / "cas_auth.py").read_text(encoding="utf-8")
     if cas.count("_select_2fa_channel_and_send") < 4:
         print("[WARN] cas_auth.py 补丁标记偏少，请确认 patches 已应用")
+    icloud_dir = APP_DIR / "server" / "providers" / "icloud"
+    missing = [m for m in ICLOUD_MARKERS if not (icloud_dir / m).is_file()]
+    if missing:
+        return fail(f"iCloud 平台包不完整，缺少 {missing}")
+    probe = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, sys.argv[1]); "
+         "import providers.icloud; "
+         "from providers.icloud.icloud_client import ICloudClient",
+         str(APP_DIR / "server")],
+        capture_output=True, text=True,
+    )
+    if probe.returncode != 0:
+        return fail(f"iCloud Provider 导入失败（需要 Python >= 3.11）:\n{probe.stderr}")
+    print("[OK] iCloud Provider 与 vendor 依赖导入成功")
     for junk in RUNTIME_FILES:
         for path in APP_DIR.rglob(junk):
             return fail(f"app/ 内存在运行时文件 {path}，先删除再打包")
     ui = APP_DIR / "ui"
-    for need in ("index.html", "config", "images/icon_256.png", "images/icon_64.png"):
+    for need in ("index.html", "config", "js/platform-icloud.js",
+                 "images/icon_256.png", "images/icon_64.png"):
         if not (ui / need).is_file():
             return fail(f"app/ui 缺少 {need}")
     for need in ("manifest", "ICON.PNG", "ICON_256.PNG"):
@@ -119,8 +145,13 @@ def verify_fpk() -> int:
         app_tgz = tf.extractfile("app.tgz")
         with tarfile.open(fileobj=app_tgz, mode="r:gz") as inner:
             inner_names = inner.getnames()
-            for need in ("server/server.py", "server/app_runtime.py", "server/hwcloudpd/daemon.py",
-                         "ui/index.html", "ui/config", "ui/images/icon_256.png"):
+            required = [
+                "server/server.py", "server/app_runtime.py", "server/hwcloudpd/daemon.py",
+                "ui/index.html", "ui/config", "ui/js/platform-icloud.js",
+                "ui/images/icon_256.png",
+            ]
+            required.extend(f"server/providers/icloud/{m}" for m in ICLOUD_MARKERS)
+            for need in required:
                 if need not in inner_names:
                     return fail(f"app.tgz 缺少 {need}")
             for junk in RUNTIME_FILES:

@@ -1,0 +1,59 @@
+diff --git a/hwcloudpd/daemon.py b/hwcloudpd/daemon.py
+--- a/hwcloudpd/daemon.py
++++ b/hwcloudpd/daemon.py
+@@ -68,6 +68,8 @@
+         self._auth_ready_event = asyncio.Event()
+         self._immediate_sync_event = asyncio.Event()
+         self._sync_lock = asyncio.Lock()
++        # Set by run_forever; lets foreign threads wake the scheduler safely.
++        self._loop: asyncio.AbstractEventLoop | None = None
+ 
+         self._auth_valid = False
+         self._credentials_rejected = False
+@@ -311,6 +313,20 @@
+                 )
+                 return None
+ 
++    def request_immediate_sync(self) -> None:
++        """Wake the scheduler from a non-asyncio thread (e.g. HTTP handler).
++
++        asyncio.Event.set() is not thread-safe: called from a plain thread it
++        flips the flag but never wakes the event loop's selector, so a waiting
++        scheduler_loop keeps sleeping until its cron timeout and the web
++        "trigger sync" button silently does nothing (T35 real-machine finding).
++        """
++        loop = self._loop
++        if loop is not None and loop.is_running():
++            loop.call_soon_threadsafe(self._immediate_sync_event.set)
++        else:
++            self._immediate_sync_event.set()
++
+     async def scheduler_loop(self) -> None:
+         """Wait for valid auth and execute syncs on startup + cron/watch schedule."""
+         await self._auth_ready_event.wait()
+@@ -340,7 +356,8 @@
+                 wait_sec = 7200.0
+                 logger.info("Next scheduled sync in %ds", int(wait_sec))
+ 
+-            self._immediate_sync_event.clear()
++            # Consume AFTER the wait: clearing before it would wipe a trigger
++            # that arrived while this iteration was still running.
+             done, pending = await asyncio.wait(
+                 [
+                     asyncio.create_task(self._stop_event.wait()),
+@@ -349,6 +366,7 @@
+                 timeout=wait_sec,
+                 return_when=asyncio.FIRST_COMPLETED,
+             )
++            self._immediate_sync_event.clear()
+             for t in pending:
+                 t.cancel()
+             if pending:
+@@ -367,6 +385,7 @@
+     async def run_forever(self) -> None:
+         """Start keep-alive and scheduler loops until SIGTERM/SIGINT."""
+         loop = asyncio.get_running_loop()
++        self._loop = loop
+         for sig in (signal.SIGTERM, signal.SIGINT):
+             try:
+                 loop.add_signal_handler(sig, self.request_stop)

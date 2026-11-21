@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>相册同步 - 华为云空间相册备份</title>
+<title>相册同步 - 多云相册备份</title>
 <style>
 :root{
   --bg:#f5f6fa; --card:#ffffff; --border:#e4e7ee; --text:#24292f; --muted:#6a7383;
@@ -310,15 +310,7 @@ pre.logs{background:#141822;color:#d6e2f0;border-radius:8px;padding:12px;font-si
 
   <!-- 同步设置 -->
   <div id="tab-settings" style="display:none">
-    <div class="card">
-      <h2>账号与认证 <span class="hint">密码以密文保存在 NAS 本地（密钥文件 secret.key，均 chmod 600），提交后不再回显</span></h2>
-      <div class="form-grid">
-        <div class="field"><label>华为账号</label><input type="text" id="f-username" placeholder="手机号 / 邮箱">
-          <span class="tip">也可不填账号，改用「认证与安全」页的 cURL 导入（免密码）</span></div>
-        <div class="field"><label>密码</label><input type="password" id="f-password" placeholder="留空保持不变">
-          <span class="tip"><label style="font-weight:400"><input type="checkbox" id="f-password-clear" style="vertical-align:-2px"> 清除已保存的密码</label></span></div>
-      </div>
-    </div>
+    <div id="cred-mount"></div><!-- 平台凭据区：由当前账号的平台模块渲染（js/platform-*.js） -->
     <div class="card">
       <h2>存储与目录</h2>
       <div class="form-grid">
@@ -415,35 +407,25 @@ pre.logs{background:#141822;color:#d6e2f0;border-radius:8px;padding:12px;font-si
         <button class="btn" onclick="loadAlbums()">刷新列表</button>
       </div>
       <div id="album-error"></div>
-      <div class="tip" style="display:block;margin-bottom:8px;line-height:1.6">注：华为云端不返回空相册，「相机 / 截屏录屏」等空系统相册为占位显示；计数为 0 表示该相册云端当前无文件，回收站中的文件不计入相册计数</div>
+      <div class="tip" id="album-platform-tip" style="display:block;margin-bottom:8px;line-height:1.6"></div>
       <div id="album-list"><div class="empty">加载中…</div></div>
     </div>
   </div>
 
-  <!-- 认证与安全 -->
+  <!-- 认证与安全（登录方式卡由当前账号的平台模块渲染进 #auth-methods-mount） -->
   <div id="tab-auth" style="display:none">
     <div class="card">
       <h2>当前登录状态</h2>
       <div id="auth-panel" class="empty">加载中…</div>
       <div class="btn-row" style="margin-top:12px">
         <button class="btn" onclick="refreshAuth()">刷新</button>
-        <button class="btn primary" id="btn-login" onclick="webLogin()">使用已保存账号登录</button>
-      </div>
-      <div id="login-output" style="margin-top:12px"></div>
-      <div id="twofa-panel" style="display:none">
-        <div class="section-title">二次验证</div>
-        <div id="twofa-channels"></div>
-        <div class="btn-row" style="margin-top:8px">
-          <input type="text" class="code-input" id="twofa-code" maxlength="6" placeholder="______" inputmode="numeric">
-          <button class="btn primary" id="btn-2fa" onclick="submit2fa()">提交验证码</button>
-        </div>
-        <div class="tip" style="margin-top:6px;color:var(--muted);font-size:12px">验证码 10 分钟内有效；验证通过后设备将被信任，后续会话过期可静默自动重登。</div>
       </div>
     </div>
-    <div class="card">
-      <h2>浏览器会话导入（免密码） <span class="hint">从已登录华为云空间的浏览器复制登录请求 cURL</span></h2>
+    <div id="auth-methods-mount"></div>
+    <div class="card" id="curl-card">
+      <h2>浏览器会话导入（免密码） <span class="hint" id="curl-card-hint"></span></h2>
       <div class="field">
-        <span class="tip">Chrome/Edge 开发者工具 → Network → 任意 cloud.dual.huawei.com 请求 → 右键「Copy as cURL」→ 粘贴到下面 → 导入。导入后 daemon 约 15 秒内热重载。</span>
+        <span class="tip" id="curl-card-tip"></span>
         <textarea id="curl-text" placeholder="curl 'https://...' -H 'cookie: ...' ..."></textarea>
       </div>
       <div class="btn-row" style="margin-top:10px">
@@ -471,6 +453,11 @@ pre.logs{background:#141822;color:#d6e2f0;border-radius:8px;padding:12px;font-si
 <div id="overlay"><div class="modal" id="modal-body"></div></div>
 <div id="overlay2"><div class="modal" id="modal2-body"></div></div>
 
+<script src="js/platform.js"></script>
+<script src="js/platform-huawei.js"></script>
+<script src="js/platform-xiaomi.js"></script>
+<script src="js/platform-icloud.js"></script>
+<script src="js/qrcode.min.js"></script>
 <script>
 "use strict";
 /* ---------- 基础工具 ---------- */
@@ -517,13 +504,19 @@ async function api(path, opts = {}) {
 }
 
 /* ---------- 导航（总览模式 / 账号工作区模式） ---------- */
-const PLATFORM_LABELS = { huawei: "华为云空间", xiaomi: "小米云相册" };
 const OVERVIEW_TABS = [["accounts", "账号管理"], ["overview", "状态总览"], ["global", "全局设置"]];
 const ACCOUNT_TABS = [["status", "同步状态"], ["settings", "同步设置"], ["albums", "相册选择"], ["auth", "认证与安全"], ["logs", "日志"]];
-const ui = { mode: "overview", tab: "accounts", current: null }; // current：当前账号 {id,name}
+const ui = { mode: "overview", tab: "accounts", current: null }; // current：当前账号 {id,name,platform}
 const timers = {};
 
 function curId() { return ui.current ? ui.current.id : null; }
+
+function curPlatform() {
+  if (ui.current && ui.current.platform) return ui.current.platform;
+  const id = curId();
+  const a = (window._accountsCacheAll || []).find(x => x.id === id);
+  return a ? a.platform : "";
+}
 
 function setAuthBadge(ok, text, cls) {
   const b = $("auth-badge");
@@ -544,9 +537,26 @@ function buildNav() {
 }
 
 function openAccount(item, tab) {
-  ui.mode = "account"; ui.current = { id: item.id, name: item.name };
+  const full = (window._accountsCacheAll || []).find(x => x.id === item.id);
+  ui.mode = "account";
+  ui.current = { id: item.id, name: item.name, platform: (full && full.platform) || "" };
   window._albumsCache = []; window._excludeCache = []; albumAllModeUI = null;
+  PlatformUI.resetMounts();  // 复位平台模块的按账号幂等缓存（挂载内容按新账号重建）
   buildNav(); switchTab(tab || "status");
+  if (!ui.current.platform) {
+    // 新建账号直跳 / 从总览进入时缓存可能缺平台信息：刷新缓存后补齐并重渲染当前页
+    loadAccounts().then(() => {
+      if (!ui.current || ui.current.platform) return;
+      const f = (window._accountsCacheAll || []).find(x => x.id === ui.current.id);
+      if (f && f.platform) {
+        ui.current.platform = f.platform;
+        PlatformUI.resetMounts();
+        if (ui.tab === "auth") refreshAuth();
+        if (ui.tab === "settings") loadConfig();
+        if (ui.tab === "status") refreshStatus();
+      }
+    });
+  }
 }
 function backToAccounts() {
   ui.mode = "overview"; ui.current = null;
@@ -607,6 +617,9 @@ async function refreshStatus() {
   else banner.innerHTML = "";
 
   const a = s.auth || {};
+  const mod = PlatformUI.current();
+  const platRows = mod && mod.authSummaryRows ? mod.authSummaryRows(a) : [];
+  const userIdLabel = mod ? mod.userIdLabel : "用户 ID";
   $("auth-summary").innerHTML =
     `<div class="kv">
       <span class="k">同步状态</span><span>${s.enabled ? (s.ok ? '<span class="badge ok">正常</span>' : '<span class="badge err">异常</span>') : '<span class="badge off">已停用</span>'}</span>
@@ -618,11 +631,9 @@ async function refreshStatus() {
       <span class="k">运行时长</span><span>${s.uptime_sec != null ? Math.floor(s.uptime_sec / 60) + " 分钟" : "—"}</span>
     </div>
     <div class="kv" style="margin-top:10px">
-      <span class="k">会话凭据</span><span>${a.has_session ? "存在（auth.json）" : "不存在"}</span>
-      <span class="k">华为用户 ID</span><span>${esc(a.user_id || "—")}</span>
-      <span class="k">图库解锁级别</span><span>${a.login_sec_level == 2 ? "2（完整，可同步）" : a.login_sec_level == 1 ? "1（受限，需二次验证解锁）" : "—"}</span>
-      <span class="k">CAS 会话</span><span>${a.has_cas_tgt ? "有效" : "无"}</span>
-      <span class="k">已保存账号密码</span><span>${a.credentials_configured ? "是" : "否（可用 cURL 导入）"}</span>
+      <span class="k">会话凭据</span><span>${a.has_session ? "存在" : "不存在"}</span>
+      <span class="k">${esc(userIdLabel)}</span><span>${esc(a.user_id || "—")}</span>
+      ${platRows.map(([k, v]) => `<span class="k">${esc(k)}</span><span>${v}</span>`).join("")}
     </div>`;
 
   const r = s.last_report;
@@ -720,9 +731,13 @@ async function loadConfig(notify) {
   catch (e) { toast("加载配置失败：" + e.message, "err"); return; }
   window._albumsCache = c.albums || [];
   window._excludeCache = c.exclude_albums || [];
-  $("f-username").value = c.username || "";
-  $("f-password").value = "";
-  $("f-password-clear").checked = false;
+  // 平台凭据区由当前账号的平台模块自治渲染与回填（js/platform-*.js）
+  const mod = PlatformUI.current();
+  const credMount = $("cred-mount");
+  if (credMount && mod) {
+    mod.renderSettingsCred(credMount, id);
+    if (mod.onConfigLoaded) mod.onConfigLoaded(c);
+  }
   $("f-photos_dir").value = c.photos_dir || "";
   probePhotosDir(c.photos_dir || "");
   checkSharedPhotosDir(id, c.photos_dir || "", "pd-shared");
@@ -758,8 +773,11 @@ async function saveConfig() {
   const id = curId(); if (!id) return;
   const btn = $("btn-save-config"); btn.disabled = true;
   const numOrNull = (v, parse = parseInt) => (v === "" || v == null ? null : parse(v));
+  // 完整保留平台凭据扩展键，公共配置字段在最后定义并覆盖同名字段。
+  const pmod = PlatformUI.current();
+  const cred = pmod && pmod.credentialPayload ? pmod.credentialPayload() : null;
   const payload = {
-    username: $("f-username").value.trim(),
+    ...(cred || {}),
     photos_dir: $("f-photos_dir").value.trim(),
     folder_structure: $("f-folder_structure").value.trim() || "{:%Y/%m/%d}",
     photo_size: $("f-photo_size").value,
@@ -793,10 +811,6 @@ async function saveConfig() {
     telegram_chat_id: $("f-telegram_chat_id").value.trim() || null,
     notification_script: $("f-notification_script").value.trim() || null,
   };
-  const pw = $("f-password").value;
-  if ($("f-password-clear").checked) payload.password = "__clear__";
-  else if (pw) payload.password = pw;
-
   if (switchState.delete_after_download || payload.keep_cloud_recent_days != null) {
     const ok = await new Promise(resolve => modalConfirm("危险操作确认",
       "已开启「下载后删除云端」或「云端仅保留 N 天」：同步会把云端对应文件<strong>移入回收站</strong>。请确认理解后再保存。",
@@ -1354,73 +1368,27 @@ async function saveAlbums() {
 /* ---------- 认证与安全 ---------- */
 async function refreshAuth() {
   const id = curId(); if (!id) return;
+  // 登录方式卡 / cURL 能力 / 平台状态行 / 待办钩子全部由平台模块提供
+  const mod = PlatformUI.current();
+  const supportsCurlImport = !!(mod && mod.applyCurlCopy);
+  $("curl-card").style.display = supportsCurlImport ? "" : "none";
+  if (mod) {
+    mod.renderAuthMethods(id);
+    if (supportsCurlImport) mod.applyCurlCopy();
+  }
   let a;
   try { a = (await api(`accounts/${id}/auth/status`)).auth; } catch (e) {
     $("auth-panel").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return;
   }
-  const lvl = a.login_sec_level == 2 ? "2（完整访问）" : a.login_sec_level == 1 ? "1（受限，待解锁）" : "—";
+  const platRows = mod && mod.authSummaryRows ? mod.authSummaryRows(a) : [];
+  const userIdLabel = mod ? mod.userIdLabel : "用户 ID";
   $("auth-panel").innerHTML = `
     <div class="kv">
       <span class="k">会话凭据</span><span>${a.has_session ? '<span class="badge ok">存在</span>' : '<span class="badge err">无</span>'}</span>
-      <span class="k">华为用户 ID</span><span>${esc(a.user_id || "—")}</span>
-      <span class="k">图库解锁级别</span><span>${lvl}</span>
-      <span class="k">CAS 会话</span><span>${a.has_cas_tgt ? "有效" : "无"}</span>
-      <span class="k">账号密码</span><span>${a.credentials_configured ? "已保存" : "未保存（可 cURL 导入）"}</span>
-      ${a.pending_2fa ? `<span class="k">待二次验证</span><span><span class="badge warn">${esc(a.pending_2fa.flow || "")}</span> ${fmtTs(a.pending_2fa.created_at)}</span>` : ""}
+      <span class="k">${esc(userIdLabel)}</span><span>${esc(a.user_id || "—")}</span>
+      ${platRows.map(([k, v]) => `<span class="k">${esc(k)}</span><span>${v}</span>`).join("")}
     </div>`;
-  if (a.pending_2fa && a.pending_2fa.channels && a.pending_2fa.channels.length) {
-    showTwoFa(a.pending_2fa.channels, "检测到未完成的二次验证（验证码可能已发送），可直接提交：");
-  }
-}
-
-function showTwoFa(channels, note) {
-  $("twofa-panel").style.display = "";
-  $("twofa-code").value = "";
-  const list = (channels && channels.length ? channels : []).map((c, i) => `
-    <div class="chan-row"><input type="radio" name="chan" ${i === 0 ? "checked" : ""} data-chan='${esc(JSON.stringify(c))}'>
-      <span>${c.accountType === 1 ? "手机" : "邮箱"}：${esc(c.name || "-")}${c.sent ? "（验证码已发送）" : ""}</span></div>`).join("");
-  $("twofa-channels").innerHTML = `${note ? `<div class="tip" style="margin-bottom:6px">${esc(note)}</div>` : ""}
-    ${list || `<div class="tip">验证码已发送，直接输入即可。</div>`}`;
-}
-
-async function webLogin() {
-  const id = curId(); if (!id) return;
-  const btn = $("btn-login"); btn.disabled = true;
-  $("login-output").innerHTML = `<span class="spin"></span> 登录中，最长约 30 秒…`;
-  $("twofa-panel").style.display = "none";
-  try {
-    const r = await api(`accounts/${id}/auth/login`, { method: "POST", body: {} });
-    if (r.status === "2fa_required") {
-      $("login-output").innerHTML = `<div class="banner warn">${esc(r.message)}</div>`;
-      showTwoFa(r.channels, "请选择接收通道并输入验证码：");
-    } else {
-      $("login-output").innerHTML = `<div class="banner" style="background:#e7f6ee;color:#147a45;border:1px solid #bfe8d1">${esc(r.message)}</div>`;
-      toast("登录成功", "ok");
-    }
-  } catch (e) {
-    $("login-output").innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
-  } finally {
-    btn.disabled = false;
-    refreshAuth();
-  }
-}
-
-async function submit2fa() {
-  const code = $("twofa-code").value.trim();
-  if (!/^\d{6}$/.test(code)) { toast("请输入 6 位数字验证码", "err"); return; }
-  const btn = $("btn-2fa"); btn.disabled = true;
-  try {
-    const r = await api(`accounts/${curId()}/auth/2fa`, { method: "POST", body: { code } });
-    if (r.status === "2fa_required") {
-      showTwoFa(r.channels, "验证码校验未通过，请重新输入：");
-      toast("验证码校验未通过", "err");
-    } else {
-      $("twofa-panel").style.display = "none";
-      $("login-output").innerHTML = `<div class="banner" style="background:#e7f6ee;color:#147a45;border:1px solid #bfe8d1">${esc(r.message)}</div>`;
-      toast("二次验证通过", "ok");
-    }
-  } catch (e) { toast(e.message, "err"); }
-  finally { btn.disabled = false; refreshAuth(); }
+  if (mod && mod.onAuthRefresh) mod.onAuthRefresh(a);
 }
 
 async function importCurl() {
@@ -1435,6 +1403,8 @@ async function importCurl() {
   finally { btn.disabled = false; }
 }
 function clearCurl() { $("curl-text").value = ""; }
+
+/* 扫码登录 / 账密登录 / 2FA 的实现由各 js/platform-*.js 平台模块自治。 */
 
 /* ---------- 日志 ---------- */
 async function loadLogs() {
@@ -1482,7 +1452,7 @@ function acctOpenArgs(a) {
 function renderAccountList(items) {
   const box = $("account-list");
   if (!items.length) {
-    box.innerHTML = `<div class="empty">还没有账号。点击右上角「新建账号」添加第一个华为云空间账号。</div>`;
+    box.innerHTML = `<div class="empty">还没有账号。点击右上角「新建账号」添加第一个云盘账号（支持 ${esc(PlatformUI.labelsText())}）。</div>`;
     return;
   }
   box.innerHTML = items.map(a => {
@@ -1491,7 +1461,7 @@ function renderAccountList(items) {
     return `<div class="acct-card ${a.enabled ? "" : "disabled"}">
       <div class="acct-main">
         <div class="acct-title">${esc(a.name)}
-          <span class="plat-chip">☁ ${esc(PLATFORM_LABELS[a.platform] || a.platform || "-")}</span>
+          <span class="plat-chip">☁ ${esc(PlatformUI.label(a.platform))}</span>
           ${acctStatusBadge(a)}
           ${a.daemon_running ? "" : a.enabled ? '<span class="badge warn">daemon 未运行</span>' : ""}
         </div>
@@ -1562,7 +1532,7 @@ function renderOverview(d) {
       </tr></thead>
       <tbody>${items.map(a => `<tr style="border-top:1px solid var(--border)">
         <td>${esc(a.name)}</td>
-        <td>${esc(PLATFORM_LABELS[a.platform] || a.platform || "-")}</td>
+        <td>${esc(PlatformUI.label(a.platform))}</td>
         <td>${acctStatusBadge(a)}</td>
         <td>${fmtTs(a.last_sync_at)}</td>
         <td style="color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.last_error || "—")}</td>
@@ -1631,7 +1601,7 @@ async function loadBackupPanel() {
     $("bk-accounts").innerHTML = items.length
       ? items.map(a => `<label style="display:block;font-weight:400;margin-bottom:4px">
           <input type="checkbox" class="bk-acc" value="${esc(a.id)}" checked style="vertical-align:-2px">
-          ${esc(a.name)}（${esc(PLATFORM_LABELS[a.platform] || a.platform || "-")}）${a.username ? " · " + esc(a.username) : ""}</label>`).join("")
+          ${esc(a.name)}（${esc(PlatformUI.label(a.platform))}）${a.username ? " · " + esc(a.username) : ""}</label>`).join("")
       : "暂无可导出的账号";
   } catch (e) { toast("加载备份信息失败：" + e.message, "err"); }
 }
@@ -1739,12 +1709,12 @@ async function importBackup() {
 /* ---------- 新建账号向导（凭据 → 存储调度 → 相册） ---------- */
 const wiz = {
   step: 1, id: null, name: "", busy: false,
-  // 各步输入暂存：步骤往返/重渲染时回填（T29.4）
-  input: { name: "", username: "", password: "", photos_dir: "", folder_structure: "{:%Y/%m/%d}", cron: "" },
+  // 各步输入暂存：步骤往返/重渲染时回填（T29.4）；platform 由向导平台卡选择写入
+  input: { name: "", username: "", password: "", platform: "", photos_dir: "", folder_structure: "{:%Y/%m/%d}", cron: "" },
 };
 
 function wizResetInput() {
-  wiz.input = { name: "", username: "", password: "", photos_dir: "", folder_structure: "{:%Y/%m/%d}", cron: "" };
+  wiz.input = { name: "", username: "", password: "", platform: PlatformUI.defaultId(), photos_dir: "", folder_structure: "{:%Y/%m/%d}", cron: "" };
 }
 
 function wizStepsHtml() {
@@ -1768,18 +1738,8 @@ function renderWizard() {
       <div class="field"><label>账号名称</label><input type="text" id="w-name" placeholder="如：家人相册、主号" value="${esc(wiz.input.name)}">
         <span class="tip">仅用于列表展示，可随时修改</span></div>
       <div class="field"><label>平台</label>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-          <label style="display:flex;gap:8px;align-items:flex-start;border:1px solid var(--border);border-radius:8px;padding:10px 14px;cursor:pointer">
-            <input type="radio" name="w-platform" value="huawei" checked style="margin-top:3px;cursor:pointer" onchange="wizInputPlatform('huawei')">
-            <span><b>华为云空间</b><br><span class="tip">相册同步 / 2FA / cURL 导入</span></span></label>
-          <label style="display:flex;gap:8px;align-items:flex-start;border:1px solid var(--border);border-radius:8px;padding:10px 14px;cursor:pointer">
-            <input type="radio" name="w-platform" value="xiaomi" style="margin-top:3px;cursor:pointer" onchange="wizInputPlatform('xiaomi')">
-            <span><b>小米云相册</b><br><span class="tip">cookie 导入（免密码）· 不支持自动重登</span></span></label>
-        </div></div>
-      <div class="field" id="w-cred-fields"><label>账号（手机号/邮箱）</label><input type="text" id="w-username" placeholder="用于登录态过期后自动重登，可留空" value="${esc(wiz.input.username)}">
-      </div>
-      <div class="field" id="w-pass-fields"><label>密码</label><input type="password" id="w-password" placeholder="用于自动重登，可留空" value="${esc(wiz.input.password)}">
-        <span class="tip">保存于应用私有数据目录（chmod 600），不发往任何第三方；也可创建后仅用 cURL 导入会话</span></div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">${PlatformUI.wizardPlatformCards(wiz.input.platform)}</div></div>
+      <div id="w-platform-cred"></div><!-- 凭据字段由所选平台模块提供（wizInputPlatform 注入） -->
       <div class="actions">
         <button class="btn" onclick="closeModal()">取消</button>
         <button class="btn primary" id="w-next" onclick="wizStep1()">创建账号</button>
@@ -1818,6 +1778,7 @@ function renderWizard() {
   }
   $("modal-body").innerHTML = body;
   $("overlay").classList.add("show");
+  if (wiz.step === 1) wizInputPlatform(currentWizardPlatform());  // 注入选中平台的凭据字段
   if (wiz.step === 2) {
     _pdCtx = { input: "w-photos_dir", probe: "w-pd-probe" };  // 向导内探测目标
     $("w-folder_structure").value = wiz.input.folder_structure;
@@ -1843,47 +1804,47 @@ async function backfillWizStep2FromServer() {
 
 function wizGoStep(n) { wiz.step = n; renderWizard(); }
 
+function currentWizardPlatform() {
+  return document.querySelector('input[name="w-platform"]:checked')?.value || PlatformUI.defaultId();
+}
+
 async function wizStep1() {
   const name = ($("w-name").value || "").trim();
-  const platform = (document.querySelector('input[name="w-platform"]:checked')?.value || "huawei");
-  const username = ($("w-username").value || "").trim();
-  const password = $("w-password").value;
-  wiz.input.name = name; wiz.input.username = username; wiz.input.password = password;
+  const platform = currentWizardPlatform();
+  const pmod = PlatformUI.get(platform);
+  // 保留完整平台凭据载荷；公共账号字段最后覆盖，避免被平台扩展键污染。
+  const cred = pmod && pmod.collectWizardCred ? pmod.collectWizardCred() : { username: "", password: "" };
+  wiz.input = { ...wiz.input, ...cred, name, platform };
   const btn = $("w-next"); btn.disabled = true;
   try {
     let r;
     if (wiz.id) {
       // 「上一步」回到第一步后再次提交：更新已有账号，避免重复创建
-      r = await api(`accounts/${wiz.id}`, { method: "PUT", body: { name, username, password, platform } });
+      r = await api(`accounts/${wiz.id}`, { method: "PUT", body: { ...cred, name, platform } });
       toast("凭据已更新，继续配置存储目录", "ok");
     } else {
       r = await api("accounts", {
         method: "POST",
         // T30.5：归属当前登录用户（普通用户服务端强制本人；admin 指定/缺省无主）
-        body: { name, username, password, platform,
+        body: { ...cred, name, platform,
                 owner: ME ? ME.user_id : "" },
       });
       wiz.id = r.account.id;
       toast("账号已创建（默认停用），继续配置存储目录", "ok");
     }
     wiz.name = r.account.name || name;
-    wiz.input.platform = platform;
     wiz.step = 2;
     renderWizard();
   } catch (e) { toast("保存失败：" + e.message, "err"); btn.disabled = false; }
 }
 
-// 向导第一步：切换平台时控制账号密码字段显隐
+// 向导第一步：切换平台时注入对应平台的凭据字段（无凭据字段平台注入空内容）
 function wizInputPlatform(p) {
-  const cred = $("w-cred-fields");
-  const pass = $("w-pass-fields");
-  if (p === "xiaomi") {
-    if (cred) cred.style.display = "none";
-    if (pass) pass.style.display = "none";
-  } else {
-    if (cred) cred.style.display = "";
-    if (pass) pass.style.display = "";
-  }
+  wiz.input.platform = p;
+  const mod = PlatformUI.get(p);
+  const mount = $("w-platform-cred");
+  if (!mount) return;
+  mount.innerHTML = mod && mod.wizardCredHtml ? mod.wizardCredHtml() : "";
 }
 
 async function wizStep2() {
@@ -1956,13 +1917,13 @@ async function finishWizard() {
   // 创建时默认停用（后端强制），向导完成时显式启用
   try { await api(`accounts/${id}/enable`, { method: "POST", body: { enabled: true } }); }
   catch (e) { toast("启用失败：" + e.message, "err"); }
-  // 完成页：引导用户到认证与安全完成登录（含 2FA 验证码）
+  // 完成页：引导用户到认证与安全完成登录（平台指引由模块提供）
+  const pmod = PlatformUI.get(wiz.input.platform || PlatformUI.defaultId());
   $("modal-body").innerHTML = `
     <h3>账号已创建并启用</h3>
     <div class="tip" style="line-height:1.9">
       最后一步：请到 <b>「认证与安全」</b> 完成登录后同步才会运行。<br>
-      · 华为账号登录通常需要输入短信验证码（二次验证），在该页按提示操作即可<br>
-      · 若未填写账号密码，可在该页使用「cURL 导入」直接导入登录态<br>
+      ${pmod && pmod.wizardFinishHint ? pmod.wizardFinishHint() : ""}
       · 登录过程中请勿关闭页面
     </div>
     <div class="actions">
@@ -2020,6 +1981,9 @@ async function loadMe() {
 window._albumsCache = window._albumsCache || [];
 window._excludeCache = window._excludeCache || [];
 (async function init() {
+  const albumTip = $("album-platform-tip");
+  if (albumTip) albumTip.textContent = PlatformUI.albumTipsText() +
+    "计数为 0 表示该相册云端当前无文件，回收站中的文件不计入相册计数";
   buildNav();
   switchTab("accounts");
   loadMe();  // T30.5：身份徽章与可见范围提示（不阻塞首屏）

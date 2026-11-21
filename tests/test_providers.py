@@ -14,8 +14,15 @@ from providers import (  # noqa: E402
     get_platform_spec,
     known_platforms,
 )
-from providers.base import AuthStrategy, PhotoProvider  # noqa: E402
+from providers.base import (  # noqa: E402
+    AuthStrategy,
+    BaseAuthStrategy,
+    NoAutoRelogin,
+    PhotoProvider,
+)
 from providers.huawei import HuaweiAuthStrategy, HuaweiProvider  # noqa: E402
+from providers.icloud import ICloudAuthStrategy, ICloudProvider  # noqa: E402
+from providers.xiaomi import XiaomiAuthStrategy  # noqa: E402
 from app_runtime import validate_account  # noqa: E402
 
 
@@ -89,6 +96,26 @@ class TestPlatformRegistry(unittest.TestCase):
         self.assertIsInstance(strat, HuaweiAuthStrategy)
         self.assertEqual(prov.account_id, account["id"])
 
+    def test_icloud_registered_with_readonly_capabilities(self):
+        spec = get_platform_spec("icloud")
+        account = make_account(
+            id="acc-icloud-test01", platform="icloud", username="user@example.com", domain="cn",
+        )
+        prov = spec.create_provider(AuthManager(self.tmp), account)
+        strat = spec.create_auth_strategy(AuthManager(self.tmp), account)
+        self.assertIsInstance(prov, ICloudProvider)
+        self.assertIsInstance(strat, ICloudAuthStrategy)
+        self.assertIsInstance(prov, PhotoProvider)
+        self.assertIsInstance(strat, AuthStrategy)
+        self.assertEqual(strat.domain, "cn")
+        self.assertFalse(spec.capabilities.supports_delete)
+        self.assertFalse(spec.capabilities.supports_curl_import)
+        self.assertFalse(spec.capabilities.supports_qr_login)
+        self.assertEqual(
+            spec.session_files(account["id"]),
+            ("icloud_acc-icloud-test01_session.json", "icloud_acc-icloud-test01_cookies.lwp"),
+        )
+
     def test_unknown_platform_rejected(self):
         with self.assertRaises(ValueError):
             get_platform_spec("bogus")
@@ -103,7 +130,78 @@ class TestPlatformRegistry(unittest.TestCase):
     def test_validate_account_platform_check(self):
         self.assertIsNone(validate_account(make_account()))
         self.assertIsNone(validate_account(make_account(platform="xiaomi")))  # T27 已注册
+        icloud = make_account(platform="icloud", domain="CN")
+        self.assertIsNone(validate_account(icloud))
+        self.assertEqual(icloud["domain"], "cn")
+        self.assertIsNotNone(validate_account(make_account(platform="icloud", domain="jp")))
         self.assertIsNotNone(validate_account(make_account(platform="bogus")))
+
+
+class TestBaseAuthStrategyContract(unittest.TestCase):
+    """平台扩展面收编为 BaseAuthStrategy 显式契约（通用层零鸭子探测）。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="albumsync-base-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_xiaomi_strategy_inherits_base_defaults(self):
+        am = AuthManager(self.tmp)
+        strat = XiaomiAuthStrategy(am, {"id": "acc-xiaomi-t1"})
+        self.assertIsInstance(strat, BaseAuthStrategy)
+        # 无 CAS 语义 → auth_probe 走基类默认
+        probe = strat.auth_probe()
+        self.assertIsNone(probe["pending_2fa"])
+        self.assertFalse(probe["has_cas_tgt"])
+        self.assertFalse(probe["credentials_configured"])
+        # 不支持自动重登 → build_authenticator 返回 NoAutoRelogin 桩
+        auth = strat.build_authenticator()
+        self.assertIsInstance(auth, NoAutoRelogin)
+        self.assertFalse(auth.can_attempt_login)
+
+    def test_base_default_qr_unsupported(self):
+        base = BaseAuthStrategy()
+        self.assertEqual(base.start_qr_login().get("status"), "error")
+        self.assertEqual(base.qr_login_status().get("status"), "failed")
+        # 小米覆写了扫码链路（不触网，仅验证覆写存在）
+        self.assertNotEqual(
+            XiaomiAuthStrategy.start_qr_login, BaseAuthStrategy.start_qr_login
+        )
+        self.assertNotEqual(
+            XiaomiAuthStrategy.qr_login_status, BaseAuthStrategy.qr_login_status
+        )
+
+    def test_session_info_platform_extract(self):
+        am = AuthManager(self.tmp)
+        xiaomi = XiaomiAuthStrategy(am, {"id": "acc-xiaomi-t3"})
+        info = xiaomi.session_info(type("S", (), {
+            "user_id": "u-123", "updated_at": 1700000000.0,
+        })())
+        self.assertEqual(info["user_id"], "u-123")
+        self.assertIsNone(info["login_sec_level"])
+        self.assertAlmostEqual(info["session_updated_at"], 1700000000.0)
+        # 华为：session_info 提取 loginSecLevel（原 app_runtime 探测逻辑下沉）
+        hw = HuaweiAuthStrategy(am, make_account(id="acc-hw-t1"))
+        info_hw = hw.session_info(type("S", (), {
+            "user_id": "hw-1", "cookies": {"loginSecLevel": "2"}, "updated_at": 1.0,
+        })())
+        self.assertEqual(info_hw["login_sec_level"], "2")
+        # 平台元数据归位
+        self.assertEqual(hw.platform_label, "华为云空间")
+        self.assertEqual(xiaomi.platform_label, "小米云相册")
+        self.assertIn("华为账号", hw.credentials_hint)
+        self.assertIn("导入登录态", xiaomi.credentials_hint)
+
+    def test_platform_session_files_declared(self):
+        from providers import get_platform_spec
+
+        hw = get_platform_spec("huawei").session_files("acc-1")
+        self.assertIn("auth.json", hw)
+        xm = get_platform_spec("xiaomi").session_files("acc-x-1")
+        self.assertEqual(xm, ("xiaomi_acc-x-1_auth.json",))
+        ic = get_platform_spec("icloud").session_files("acc-i-1")
+        self.assertEqual(
+            ic, ("icloud_acc-i-1_session.json", "icloud_acc-i-1_cookies.lwp")
+        )
 
 
 if __name__ == "__main__":

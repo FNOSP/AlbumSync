@@ -391,6 +391,23 @@ class TestManagerBasics(ManagerTest):
         rt = self.mgr._runtimes[acc["id"]]
         self.assertTrue(rt._daemon_thread is None or not rt._daemon_thread.is_alive())
 
+    def test_icloud_domain_persisted_and_delete_options_clamped(self):
+        acc = self._create(
+            "iCloud", platform="icloud", domain="CN", auto_delete=True,
+            delete_after_download=True, keep_cloud_recent_days=7,
+        )
+        self.assertEqual(acc["domain"], "cn")
+        raw = json.loads((self.tmp / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(raw["accounts"][0]["domain"], "cn")
+        self.assertNotIn("password", raw["accounts"][0])
+        cfg = app_runtime.SyncConfig(
+            auto_delete=True, delete_after_download=True, keep_cloud_recent_days=7,
+        )
+        self.mgr._runtimes[acc["id"]]._apply_capabilities(cfg)
+        self.assertFalse(cfg.auto_delete)
+        self.assertFalse(cfg.delete_after_download)
+        self.assertIsNone(cfg.keep_cloud_recent_days)
+
     def test_create_invalid_rejected(self):
         result = self.mgr.create_account({"cron": "bad cron"})
         self.assertEqual(result["status"], "error")

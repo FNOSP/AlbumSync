@@ -1,0 +1,71 @@
+diff --git a/hwcloudpd/daemon.py b/hwcloudpd/daemon.py
+--- a/hwcloudpd/daemon.py
++++ b/hwcloudpd/daemon.py
+@@ -158,6 +158,10 @@
+         logger.info("Session expired/missing; attempting silent CAS protocol auto-relogin...")
+         try:
+             await asyncio.to_thread(self.authenticator.login, interactive=False)
++            # T28.3: relogin may rotate the CASTGC cookie; make sure the jar on
++            # disk matches memory (idempotent when login() already saved it).
++            if hasattr(self.authenticator, "persist_cookie_jar_if_changed"):
++                await asyncio.to_thread(self.authenticator.persist_cookie_jar_if_changed)
+             await asyncio.to_thread(self.client.heartbeat_check)
+             self._auth_valid = True
+             self._last_heartbeat_at = time.time()
+@@ -212,6 +216,14 @@
+             self._auth_ready_event.set()
+             self.notifier.reset_auth_cooldown()
+             self.write_health()
++            # T28.3: heartbeat may receive rotated CASTGC cookies that only land
++            # in the in-memory jar; persist when it differs from disk so a
++            # process restart keeps the rotated session.
++            if self.authenticator is not None and hasattr(
++                self.authenticator, "persist_cookie_jar_if_changed"
++            ):
++                if await asyncio.to_thread(self.authenticator.persist_cookie_jar_if_changed):
++                    logger.info("CAS cookie jar rotated at runtime; persisted to disk.")
+             if not was_valid and reloaded:
+                 # Credentials just recovered while running: kick off a sync promptly.
+                 self._immediate_sync_event.set()
+diff --git a/hwcloudpd/cas_auth.py b/hwcloudpd/cas_auth.py
+--- a/hwcloudpd/cas_auth.py
++++ b/hwcloudpd/cas_auth.py
+@@ -242,6 +242,38 @@
+             pass
+         os.replace(tmp, self.cookie_jar_path)
+ 
++    def persist_cookie_jar_if_changed(self) -> bool:
++        """Persist the in-memory cookie jar only when it differs from disk (T28.3).
++
++        Keepalive heartbeats may receive rotated CASTGC cookies that only land
++        in the in-memory jar; persisting unconditionally would rewrite the lwp
++        file every cycle for no reason. Serialize to a scratch file, compare
++        with the on-disk jar, and save atomically only on a real diff.
++        """
++        try:
++            if not any(self._cookie_jar):
++                return False
++            cmp_path = self.cookie_jar_path.with_name(f".cas_cookies.{os.getpid()}.cmp")
++            try:
++                self._cookie_jar.save(str(cmp_path), ignore_discard=True, ignore_expires=False)
++                new_content = cmp_path.read_bytes() if cmp_path.exists() else b""
++            finally:
++                try:
++                    cmp_path.unlink(missing_ok=True)
++                except OSError:
++                    pass
++            if self.cookie_jar_path.exists():
++                try:
++                    if self.cookie_jar_path.read_bytes() == new_content:
++                        return False
++                except OSError:
++                    pass
++            self._save_cookie_jar()
++            return True
++        except Exception as exc:
++            logger.debug("persist_cookie_jar_if_changed failed: %s", exc)
++            return False
++
+     @contextmanager
+     def _acquire_lock(self, timeout_sec: float = 30.0) -> Iterator[None]:
+         self.lock_file.parent.mkdir(parents=True, exist_ok=True)

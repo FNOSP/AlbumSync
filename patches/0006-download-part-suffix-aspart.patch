@@ -1,0 +1,23 @@
+diff --git a/hwcloudpd/sync.py b/hwcloudpd/sync.py
+--- a/hwcloudpd/sync.py
++++ b/hwcloudpd/sync.py
+@@ -285,6 +285,18 @@
+             reserved_paths.add(target_path)
+
+         target_path.parent.mkdir(parents=True, exist_ok=True)
+-        part_path = target_path.with_name(f".{target_path.name}.{item.unique_id[:7]}.hwpart")
++        # T32: download temp suffix branded as .aspart (AlbumSync Part).
++        # Legacy .hwpart part-files are auto-migrated here so interrupted
++        # downloads keep their already-downloaded bytes and resume seamlessly.
++        # The id fragment may contain "/" (e.g. iCloud record names); replace
++        # it so the hidden part file stays inside the target directory.
++        id7 = item.unique_id[:7].replace("/", "_")
++        part_path = target_path.with_name(f".{target_path.name}.{id7}.aspart")
++        legacy_part = target_path.with_name(f".{target_path.name}.{id7}.hwpart")
++        if legacy_part.is_file():
++            if part_path.is_file():
++                legacy_part.unlink(missing_ok=True)  # new suffix already present: drop stale legacy part
++            else:
++                os.replace(legacy_part, part_path)
+
+         last_err: Exception | None = None

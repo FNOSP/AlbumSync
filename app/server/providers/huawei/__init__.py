@@ -14,6 +14,7 @@ HuaweiCasAuthenticator（CAS 账密两段式登录）。vendor 引擎零改动�
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -26,7 +27,7 @@ from hwcloudpd.models import (
     MediaItem,
     MediaStub,
 )
-from providers.base import ProviderCapabilities
+from providers.base import BaseAuthStrategy, ProviderCapabilities
 
 logger = logging.getLogger("albumsync.providers.huawei")
 
@@ -41,6 +42,28 @@ class HuaweiProvider:
         self.auth_manager = auth_manager
         self.account_id = account_id or "huawei"
         self._client = HuaweiGalleryClient(auth_manager)
+        self._maybe_attach_observer()
+
+    def _maybe_attach_observer(self) -> None:
+        """T28.7：ALBUMSYNC_HTTP_OBSERVER=1 时挂响应观察器（默认关闭）。
+
+        每个 API 响应打一行 debug 日志（path/status/Set-Cookie 数量），用于
+        接入新厂商时的交互录制与凭据轮替排查。见 docs/multi-account-multi-
+        platform-architecture.md「5.2.2 响应观察器」。
+        """
+        if os.environ.get("ALBUMSYNC_HTTP_OBSERVER", "").strip() not in ("1", "true", "yes"):
+            return
+        account = self.account_id
+
+        def observe(info: dict[str, Any]) -> None:
+            cookies = info.get("set_cookies") or {}
+            logger.debug(
+                "[observer:%s] %s %s set_cookies=%s",
+                account, info.get("status"), info.get("path"), sorted(cookies),
+            )
+
+        self._client.response_observer = observe
+        logger.info("huawei response observer attached (ALBUMSYNC_HTTP_OBSERVER), account=%s", account)
 
     # -- 引擎调用面（10 方法，原样委托） --
 
@@ -107,7 +130,7 @@ class HuaweiProvider:
         return self._client.delete_cloud_files(items)
 
 
-class HuaweiAuthStrategy:
+class HuaweiAuthStrategy(BaseAuthStrategy):
     """AuthStrategy 实现：CAS 账密两段式登录 + cURL 会话导入。"""
 
     PLATFORM = "huawei"
@@ -116,6 +139,15 @@ class HuaweiAuthStrategy:
     CURL_HINT = (
         "请复制 cloud.huawei.com 域下已登录请求（如 /album/getSimpleFile 或 "
         "/heartbeatCheck）为 cURL (bash) 格式"
+    )
+    # -- 平台元数据（BaseAuthStrategy 约定，通用层直接读取） --
+    platform_label = "华为云空间"
+    credentials_hint = "请先在「同步设置」中填写华为账号与密码"
+    login_success_hint = "登录成功（信任设备生效后，会话过期将静默自动重登）"
+    auth_recovery_hint = (
+        "若已配置 HUAWEI_USERNAME/HUAWEI_PASSWORD 请执行 "
+        "`docker exec -it hwcloudpd hwcloudpd --auth-only` 输入二次验证码；"
+        "或从浏览器 Copy as cURL 覆盖写入 config/curl.txt，容器将自动热恢复。"
     )
 
     def __init__(
@@ -154,8 +186,9 @@ class HuaweiAuthStrategy:
     def has_credentials(self) -> bool:
         return self.build_authenticator().has_credentials
 
-    def web_login(self, *, prompt_fn: Any = None, output_fn: Any = None) -> Any:
-        """账号密码登录（非交互）。触发 2FA 时抛 TwoFactorRequiredError。
+    def web_login(self, *, prompt_fn: Any = None, output_fn: Any = None,
+                  interactive: bool = False) -> Any:
+        """账号密码登录（网页触发）。触发 2FA 时抛 TwoFactorRequiredError。
 
         凭据缺失抛 AuthExpiredError（与 vendor 异常族一致，调用方统一捕获）。
         """
@@ -186,8 +219,8 @@ class HuaweiAuthStrategy:
             logger.warning("load pending 2fa failed: %s", exc)
             return None
 
-    def cas_probe(self) -> dict[str, Any]:
-        """华为扩展探针：auth_status 用（CAS TGT/凭据/待验证状态）。"""
+    def auth_probe(self) -> dict[str, Any]:
+        """华为认证探针：auth_status 用（CAS TGT/凭据/待验证状态）。"""
         try:
             authenticator = self.build_authenticator()
             pending = authenticator._load_pending_2fa()
@@ -200,6 +233,27 @@ class HuaweiAuthStrategy:
             "pending_2fa": pending,
             "has_cas_tgt": has_tgt,
             "credentials_configured": credentials,
+        }
+
+    def session_info(self, session: Any) -> dict[str, Any]:
+        """华为会话字段提取：user_id + loginSecLevel（CAS 语义）。"""
+        user_id = str(getattr(session, "user_id", "") or "")
+        login_sec_level = None
+        cookies = getattr(session, "cookies", None)
+        if isinstance(cookies, dict):
+            login_sec_level = cookies.get("loginSecLevel")
+        if not user_id:
+            # CAS cookiejar 内兜底找 userId cookie
+            jar = getattr(session, "cookiejar", None)
+            if jar is not None and hasattr(jar, "__iter__"):
+                for c in jar:
+                    if getattr(c, "name", "") == "userId":
+                        user_id = str(c.value or "")
+                        break
+        return {
+            "user_id": user_id,
+            "login_sec_level": login_sec_level,
+            "session_updated_at": getattr(session, "updated_at", None),
         }
 
     def import_session(self, curl_text: str) -> Any:
