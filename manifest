@@ -1,5 +1,5 @@
 appname                    = AlbumSync
-version                    = 0.3.26
+version                    = 0.3.27
 display_name               = 相册同步
 desc                       = """多云相册备份到飞牛 NAS。支持多账号：同一平台可添加多个账号，各自独立管理相册选择、存储目录、调度与登录态，账号间完全隔离、互不干扰，配置保存按账号热生效。华为云空间支持两种登录：浏览器会话 cURL 导入（免密码）与账号密码登录（短信/邮箱二次验证码在网页提交，信任设备后静默重登）。小米云相册（i.mi.com）支持浏览器 cookie 导入（免密码，不支持自动重登）。iCloud 云相册支持 Apple ID/密码登录、双重认证/两步验证及国际区/中国区。同步能力：按相册/文件类型/时间范围过滤、增量下载、目录结构模板、删除镜像策略、并发与限速、cron 定时同步、dry-run 预览、Webhook 通知。账号密码使用机器密钥加密落盘（config 仅存密文），并支持口令加密的凭据备份导出/导入（.asbak，可在全局设置中配置备份目录）。内置 Web 管理界面（账号管理/状态总览/全局设置/单账号工作区）。华为/小米同步引擎基于上游开源项目 hwcloudpd；iCloud 协议复用随包 vendor 的 icloud_photos_downloader 及其纯 Python 依赖，无需 venv/pip 或 NAS 额外安装。开源地址：https://github.com/tuber0613/hwcloudpd"""
 platform                   = x86
@@ -17,6 +17,12 @@ checkport                  = true
 install_dep_apps           = python311
 disable_authorization_path = true
 changelog                  = """
+- 0.3.27 修复 CI 构建包缺失同步引擎导致安装后无法启动：app/server/hwcloudpd
+  （由 tools/sync_engine.py 从上游 hwcloudpd 生成并应用 patches/0001-0008）此前被
+  .gitignore 排除，GitHub Actions 只检出仓库追踪文件，打出的 fpk 缺整个引擎模块，
+  安装机械成功但 server.py 启动即崩（ModuleNotFoundError: hwcloudpd，真机复现）。
+  现引擎随包入库（vendor 化），CI 检出即得完整源码，构建不再依赖引擎仓库；
+  引擎更新流程不变（tools/sync_engine.py 同步后提交）
 - 0.3.26 小米长效会话（免扫码，T36.5）：破解小米账号会话模型——serviceToken 短命（实测 ~15-30 分钟）而 account 域 passToken（浏览器「信任设备」登录签发）可无限次换发 serviceToken 且自身不轮替；认证页新增「长效会话（免扫码）」卡片：从 DevTools → Application → Cookies → account.xiaomi.com 复制 passToken/userId/cUserId/deviceId 导入，导入即换发验证；daemon 每 25 分钟自动静默续期、401/探活失败自动恢复（失败 30 分钟冷却；70016 票据死亡自动停用并提示重新导入）；重签链两个协议坑已内化（callback 双层→单层编码、serviceLogin 必带 sid=i.mi.com）；机制详见 docs/xiaomi-cloud-api-research.md §7；新增 14 项单测（编码修正/成功链/70016 分类/自动恢复/冷却/阈值/导入校验），全量 253 绿；跨天免扫码真机验收待小米风控冷却后进行
 - 0.3.25 修复 install_dep_apps 依赖声明失效：依赖名含空格（python 3.11）
   不符合应用中心按技术 appname（无空格）解析依赖项的格式，自引入起即被

@@ -1,6 +1,3 @@
-# vendored engine（由 tools/sync_engine.py 生成，勿手工编辑）
-app/server/hwcloudpd/
-
 # 打包产物
 *.fpk
 
