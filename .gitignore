@@ -19,9 +19,6 @@ app/server/hwcloudpd/
 # 本地开发数据目录（server.py dev 模式）
 dev-data/
 
-# 打包工具二进制（4MB，从 FreePower 复制获取）
-tools/fnpack.exe
-
 # Python 运行产物
 __pycache__/
 *.pyc

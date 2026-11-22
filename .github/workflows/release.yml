@@ -1,0 +1,75 @@
+name: Release fpk
+
+# A: 推送 v* tag 自动打包发布；C: 手动输入 tag 兜底重打包
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要打包的 tag（如 v0.3.26）'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+          fetch-depth: 0
+
+      - name: 校验 manifest 版本与 tag 一致
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          if (-not $tag.StartsWith('v')) { Write-Error "tag 必须以 v 开头: $tag"; exit 1 }
+          $expected = $tag.Substring(1)
+          $line = Select-String -Path manifest -Pattern '^version\s*=\s*(.+)$' | Select-Object -First 1
+          if (-not $line) { Write-Error "manifest 中未找到 version 行"; exit 1 }
+          $actual = $line.Matches[0].Groups[1].Value.Trim()
+          if ($actual -ne $expected) {
+            Write-Error "版本不一致: manifest version=$actual, tag=$expected（先 bump manifest 再打 tag）"
+            exit 1
+          }
+          Write-Host "版本校验通过: $actual"
+
+      - name: fnpack 打包
+        shell: pwsh
+        run: |
+          .\tools\fnpack.exe build -d .
+          $fpk = Get-ChildItem -Path *.fpk | Select-Object -First 1
+          if (-not $fpk) { Write-Error "未生成 fpk"; exit 1 }
+          Write-Host "产出: $($fpk.Name)（$($fpk.Length) bytes）"
+          "FPK_NAME=$($fpk.Name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: 上传 artifact（调试留档，7 天）
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk
+          path: '*.fpk'
+          retention-days: 7
+
+      - name: 创建/更新 Release 并上传 fpk
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $fpk = $env:FPK_NAME
+          $notes = git tag -l --format='%(contents)' $tag
+          if ([string]::IsNullOrWhiteSpace($notes)) { $notes = "Release $tag" }
+          $notes | Out-File -FilePath notes.txt -Encoding utf8
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $fpk --clobber
+            Write-Host "已更新现有 Release $tag（fpk --clobber 覆盖）"
+          } else {
+            gh release create $tag $fpk --title $tag --notes-file notes.txt
+            Write-Host "已创建 Release $tag"
+          }
