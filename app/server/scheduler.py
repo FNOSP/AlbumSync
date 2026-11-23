@@ -386,6 +386,21 @@ class SchedulerManager:
     def import_curl(self, account_id: str, curl_text: str) -> dict[str, Any]:
         return self._require_runtime(account_id).import_curl(curl_text)
 
+    def import_longterm(self, account_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._require_runtime(account_id).import_longterm(payload)
+
+    def password_login_start(self, account_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._require_runtime(account_id).password_login_start(payload)
+
+    def password_login_captcha(self, account_id: str, code: str) -> dict[str, Any]:
+        return self._require_runtime(account_id).password_login_captcha(code)
+
+    def password_login_verify(self, account_id: str, code: str) -> dict[str, Any]:
+        return self._require_runtime(account_id).password_login_verify(code)
+
+    def password_login_status(self, account_id: str) -> dict[str, Any]:
+        return self._require_runtime(account_id).password_login_status()
+
     def start_qr_login(self, account_id: str) -> dict[str, Any]:
         return self._require_runtime(account_id).start_qr_login()
 

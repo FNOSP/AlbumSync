@@ -55,8 +55,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _http(url: str, cookie: str = "", method: str = "GET",
-          timeout: float = 30.0) -> tuple[int, bytes, dict[str, str], str]:
-    """不跟随重定向的 GET/POST；返回 (status, body, headers_dict, final_url)。"""
+          timeout: float = 30.0) -> tuple[int, bytes, Any, str]:
+    """不跟随重定向的 GET/POST；返回 (status, body, headers, final_url)。
+
+    headers 保留原始 HTTPMessage（多条 Set-Cookie 不能折叠成 dict——
+    dict() 会丢重名键，STS 链签发的 userId/slh/ph 会因此全部丢失）。
+    """
     req = urllib.request.Request(url, headers={
         "Cookie": cookie,
         "Referer": "https://i.mi.com/gallery/h5",
@@ -65,9 +69,9 @@ def _http(url: str, cookie: str = "", method: str = "GET",
     opener = urllib.request.build_opener(_NoRedirect())
     try:
         resp = opener.open(req, timeout=timeout)
-        return resp.status, resp.read(), dict(resp.headers), resp.geturl()
+        return resp.status, resp.read(), resp.headers, resp.geturl()
     except urllib.error.HTTPError as e:
-        return e.code, e.read(), dict(e.headers), e.url
+        return e.code, e.read(), e.headers, e.url
 
 
 def _strip_json_prefix(body: bytes) -> dict[str, Any]:
@@ -77,13 +81,19 @@ def _strip_json_prefix(body: bytes) -> dict[str, Any]:
     return json.loads(text)
 
 
-def parse_set_cookies(headers: dict[str, str]) -> dict[str, str]:
-    """从 Set-Cookie 原始头手工解析 name=value（cookiejar 会丢部分域/属性）。"""
+def parse_set_cookies(headers: Any) -> dict[str, str]:
+    """从响应头手工解析全部 Set-Cookie 的 name=value（cookiejar 会丢部分域/属性）。
+
+    headers 须保留重复头：HTTPMessage.items() 会逐条给出全部 Set-Cookie；
+    兼容旧调用方传入的单值 dict（多条 cookie 以 `Path=/,` 拼接时按此切分）。
+    """
     out: dict[str, str] = {}
+    if headers is None:
+        return out
     for key, val in headers.items():
         if key.lower() != "set-cookie":
             continue
-        for part in val.split("Path=/,"):
+        for part in re.split(r"Path=/,|\n", str(val)):
             kv = part.strip().split(";")[0]
             if "=" in kv:
                 name, _, value = kv.partition("=")

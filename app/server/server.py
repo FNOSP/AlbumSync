@@ -357,6 +357,8 @@ class RequestHandler(GatewayMixin, BaseHTTPRequestHandler):
         elif action == "auth/qr/poll":
             # 长轮询：lp 挂起最长 ~65s；前端 fetch 需 ≥70s 超时
             self.api_get(lambda: mg.qr_login_status(acct), wrap_key="qr")
+        elif action == "auth/password-login/status":
+            self.api_get(lambda: mg.password_login_status(acct), wrap_key="pwd")
         elif action == "albums":
             self.api_get(lambda: mg.list_albums(acct), wrap_key="albums")
         elif action == "logs":
@@ -390,6 +392,12 @@ class RequestHandler(GatewayMixin, BaseHTTPRequestHandler):
             self.api_post(mg.import_curl, acct, str(body.get("curl") or ""))
         elif action == "auth/import-longterm":
             self.api_post(mg.import_longterm, acct, body if isinstance(body, dict) else {})
+        elif action == "auth/password-login/start":
+            self.api_post(mg.password_login_start, acct, body if isinstance(body, dict) else {})
+        elif action == "auth/password-login/captcha":
+            self.api_post(mg.password_login_captcha, acct, str(body.get("code") or ""))
+        elif action == "auth/password-login/verify":
+            self.api_post(mg.password_login_verify, acct, str(body.get("code") or ""))
         elif action == "auth/qr/start":
             self.api_post(mg.start_qr_login, acct)
         else:

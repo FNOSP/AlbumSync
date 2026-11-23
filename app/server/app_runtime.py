@@ -1175,6 +1175,27 @@ class AccountRuntime:
                 "rounds": state.get("rounds", 1),
             }
 
+    def password_login_start(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """小米账号密码登录发起（T38）：策略层状态机返回 ok/captcha/2fa/error。"""
+        with self._log_ctx():
+            return self.strategy.password_login_start(
+                payload if isinstance(payload, dict) else {})
+
+    def password_login_captcha(self, code: str) -> dict[str, Any]:
+        """小米密码登录：提交图形验证码（Auth2 或发码嵌套阶段）。"""
+        with self._log_ctx():
+            return self.strategy.password_login_captcha(str(code or ""))
+
+    def password_login_verify(self, code: str) -> dict[str, Any]:
+        """小米密码登录：提交短信/邮箱 2FA 验证码。"""
+        with self._log_ctx():
+            return self.strategy.password_login_verify(str(code or ""))
+
+    def password_login_status(self) -> dict[str, Any]:
+        """小米密码登录：当前流程状态 + 已保存预填凭据信息。"""
+        with self._log_ctx():
+            return self.strategy.password_login_status()
+
     def start_qr_login(self) -> dict[str, Any]:
         """创建扫码票据（T31.3）。不支持的平台由 BaseAuthStrategy 默认实现返回 error。"""
         with self._log_ctx():

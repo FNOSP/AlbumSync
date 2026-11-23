@@ -24,9 +24,11 @@ import logging
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+import crypto_box
 from hwcloudpd.models import (
     AlbumInfo,
     AuthExpiredError,
@@ -34,6 +36,12 @@ from hwcloudpd.models import (
     MediaStub,
 )
 from providers.base import BaseAuthStrategy, ProviderCapabilities
+
+from providers.xiaomi.password_login import (
+    PENDING_TTL_SEC,
+    PasswordLoginError,
+    PasswordLoginSession,
+)
 
 from providers.xiaomi.xiaomi_client import (
     XiaomiAPIError,
@@ -64,7 +72,8 @@ class XiaomiSessionStore:
     def __init__(self, auth_file: str | Path) -> None:
         self.auth_file = Path(auth_file)
 
-    def save(self, cookies: dict[str, str], longterm: dict[str, Any] | None = None) -> None:
+    def save(self, cookies: dict[str, str], longterm: dict[str, Any] | None = None,
+             extra: dict[str, Any] | None = None) -> None:
         auth_file = Path(self.auth_file)  # 防御 str 覆盖构造器 Path 转换
         auth_file.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -79,6 +88,14 @@ class XiaomiSessionStore:
             longterm = prev.get("longterm") if prev else None
         if longterm:
             payload["longterm"] = longterm
+        # 保留已保存的密码预填凭据（T38.5：信封加密密码 + 用户名）
+        prev = self.load()
+        if prev:
+            for key in ("login_username", "login_password_enc"):
+                if key in prev and key not in payload:
+                    payload[key] = prev[key]
+        if extra:
+            payload.update(extra)  # 调用方显式指定优先（含显式清除）
         tmp = auth_file.with_suffix(auth_file.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         os.chmod(tmp, 0o600)  # T28.1：凭据文件权限收紧（对齐华为 auth.json）
@@ -97,6 +114,20 @@ class XiaomiSessionStore:
             return None
         lt = data.get("longterm")
         return lt if isinstance(lt, dict) and lt.get("pass_token") else None
+
+    def save_login_secret(self, username: str, enc: dict[str, Any] | None) -> None:
+        """保存/清除密码登录预填凭据（T38.5：username 明文 + 密码信封密文）。"""
+        data = self.load() or {}
+        extra = {
+            "login_username": str(username or ""),
+            "login_password_enc": enc,  # None = 显式清除
+        }
+        cookies = {str(k): str(v) for k, v in (data.get("cookies") or {}).items()}
+        self.save(cookies, longterm=data.get("longterm"), extra=extra)
+
+    def load_login_secret(self) -> tuple[str, dict[str, Any] | None]:
+        data = self.load() or {}
+        return str(data.get("login_username") or ""), data.get("login_password_enc") or None
 
 
     def load(self) -> dict[str, Any] | None:
@@ -177,6 +208,12 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
         self._client_file_mtime: float = 0.0
         # 长效票重签失败冷却截止（T36.5）
         self._longterm_cooldown_until: float = 0.0
+        # 密码登录 pending 会话（T38.5）：单账号单流程，TTL 内有效
+        self._pwd_login: PasswordLoginSession | None = None
+        # 发起时暂存的凭据（成功后按「记住密码」决定信封落盘，随后即弃）
+        self._pwd_creds: dict[str, Any] | None = None
+        # 密码登录失败冷却截止（防爆破/风控升级）
+        self._pwd_cooldown_until: float = 0.0
 
     # -- 懒构造 client --
 
@@ -405,10 +442,9 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
 
     # -- 长效会话（T36.5，机制 docs/xiaomi-cloud-api-research.md §7） --
 
-    # 长效 serviceToken 主动续期阈值：serviceToken 短命（实测 ~15-30 分钟，
-    # 重签后旧值 15 分钟并存窗口作废），心跳间隔 60s 粒度下 25 分钟阈值保证
-    # 同步窗口永不踩 401。
-    LONGTERM_REFRESH_MAX_AGE_SEC = 1500
+    # 长效 serviceToken 主动续期阈值：serviceToken 短命（T40 真机实测签发后
+    # ~21 分钟即 401，早于原 25 分钟阈值），取 15 分钟保证同步窗口不踩 401。
+    LONGTERM_REFRESH_MAX_AGE_SEC = 900
     # 重签失败冷却（风控软拦/服务端波动期避免高频重试加深风控）
     LONGTERM_RETRY_COOLDOWN_SEC = 1800
 
@@ -423,6 +459,26 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
             passport_ph=str(lt.get("passport_ph") or ""),
         )
 
+    @staticmethod
+    def _fill_session_identity(
+        cookies: dict[str, str], user_id: str,
+        c_user_id: str = "", device_id: str = "",
+    ) -> dict[str, str]:
+        """把长效票据携带的身份字段回填进重签 cookie 集。
+
+        renew() 的 STS 链可能只回传 serviceToken（部分 Set-Cookie 被丢弃），
+        而 validate_session_cookies 要求 userId+serviceToken 成对——缺 userId
+        会让导入/续期落盘的会话直接被判「未导入或无效」。已存在的值不覆盖。
+        """
+        merged = dict(cookies)
+        if user_id:
+            merged["userId"] = str(merged.get("userId") or user_id)
+        if c_user_id:
+            merged.setdefault("cUserId", c_user_id)
+        if device_id:
+            merged.setdefault("deviceId", device_id)
+        return merged
+
     def import_longterm(self, payload: dict[str, Any]) -> XiaomiClient:
         """导入 account 域长效票据并立即换发验证（T36.5）。
 
@@ -435,11 +491,17 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
         user_id = str(payload.get("userId") or payload.get("user_id") or "").strip()
         if not pass_token or not user_id:
             raise AuthExpiredError("导入失败：passToken 与 userId 均必填")
+        device_id = str(payload.get("deviceId") or payload.get("device_id") or "").strip()
+        if not device_id:
+            # 缺省时生成固定 deviceId（wb_+UUID，与真实浏览器设备同格式）并随
+            # 长效票据持久化：设备标识跨导入/重装保持稳定比每次更换更接近
+            # 真实设备，降低风控概率（小米相册同赛道项目 XiaomiAlbumSyncer 同款做法）
+            device_id = "wb_" + str(uuid.uuid4())
         renewer = self._longterm_renewer({
             "pass_token": pass_token,
             "user_id": user_id,
             "c_user_id": str(payload.get("cUserId") or payload.get("c_user_id") or ""),
-            "device_id": str(payload.get("deviceId") or payload.get("device_id") or ""),
+            "device_id": device_id,
             "account_service_token": str(
                 payload.get("accountServiceToken") or payload.get("account_service_token") or ""),
             "passport_slh": str(payload.get("passportSlh") or ""),
@@ -453,6 +515,18 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
                     f"passToken 已失效（{exc}）。请从已登录 i.mi.com 的浏览器重新复制："
                     "F12 → Application → Cookies → account.xiaomi.com → passToken")
             raise AuthExpiredError(f"长效票据验证失败（{exc}），请稍后重试")
+        # 双次换发校验：扫码签发的 passToken 是一次性特权票，第一轮换发能成功、
+        # 第二轮必 70016 作废。两轮都成功才承认为长效票，避免误收后 ~25 分钟掉线。
+        try:
+            renewer.renew()
+        except LongtermSessionError as exc:
+            if exc.code == TOKEN_DEAD:
+                raise AuthExpiredError(
+                    "检测到一次性票据（扫码签发的 passToken 换发一次即作废）。"
+                    "请在浏览器退出后用密码登录（信任设备），重新复制 passToken 再导入")
+            raise AuthExpiredError(f"长效票据二次验证失败（{exc}），请稍后重试")
+        cookies = self._fill_session_identity(
+            cookies, user_id, renewer.c_user_id, renewer.device_id)
         self.store.save(cookies)
         self.store.save_longterm({
             "pass_token": pass_token,
@@ -472,6 +546,135 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
         logger.info("xiaomi longterm session imported, account=%s userId=%s",
                     self.account_id, user_id)
         return self._client
+
+    # -- 账号密码登录（T38，协议 research §8.5） --
+
+    PASSWORD_LOGIN_COOLDOWN_SEC = 1800  # 失败冷却：防爆破/风控升级
+    _PASSWORD_AAD = "albumsync:password:"  # 与 AppConfig 同前缀（绑定账号 id）
+
+    def _pwd_key(self) -> bytes:
+        # 与 AppConfig 共用同一把机器密钥（pkgvar/secret.key）
+        pkgvar = Path(self.store.auth_file).parent.parent
+        return crypto_box.load_or_create_key(pkgvar / "secret.key")
+
+    def password_login_start(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """账号密码发起登录：返回 {status: ok|captcha|2fa|error, ...}。"""
+        data = payload if isinstance(payload, dict) else {}
+        now = time.time()
+        if now < self._pwd_cooldown_until:
+            wait = int(self._pwd_cooldown_until - now)
+            return {"status": "error",
+                    "message": f"密码登录失败冷却中，约 {max(wait // 60, 1)} 分钟后可重试"}
+        if self._pwd_login is not None and not self._pwd_login.expired() \
+                and self._pwd_login.stage != "done":
+            return {"status": "error",
+                    "message": "已有进行中的密码登录，请完成当前流程或等待其过期"}
+        user = str(data.get("user") or data.get("username") or "").strip()
+        remember = bool(data.get("rememberPassword"))
+        if bool(data.get("useSaved")):
+            saved_user, enc = self.store.load_login_secret()
+            user = user or saved_user
+            try:
+                # AAD 已随信封存储（seal_text 绑定账号 id），open_text 无需传入
+                password = crypto_box.open_text(self._pwd_key(), enc) if enc else ""
+            except Exception:
+                password = ""
+            if not password:
+                return {"status": "error", "message": "没有已保存的密码，请直接输入"}
+        else:
+            password = str(data.get("password") or "")
+        if not user or not password:
+            return {"status": "error", "message": "账号与密码均必填"}
+        self._pwd_creds = {"user": user, "password": password, "remember": remember}
+        session = PasswordLoginSession(user, password)
+        self._pwd_login = session
+        try:
+            res = session.start()
+        except PasswordLoginError as exc:
+            self._pwd_fail("xiaomi password login failed", exc)
+            return {"status": "error", "message": str(exc)}
+        return self._pwd_route_result(session, res)
+
+    def password_login_captcha(self, code: str) -> dict[str, Any]:
+        return self._pwd_step(lambda s: s.submit_captcha(code))
+
+    def password_login_verify(self, code: str) -> dict[str, Any]:
+        return self._pwd_step(lambda s: s.submit_verify(code))
+
+    def password_login_status(self) -> dict[str, Any]:
+        session = self._pwd_login
+        active = (session is not None and not session.expired()
+                  and session.stage != "done")
+        username, enc = self.store.load_login_secret()
+        now = time.time()
+        return {
+            "active": active,
+            "stage": session.stage if active else "",
+            "expires_in": int(PENDING_TTL_SEC - (now - session.created_at))
+                          if active else 0,
+            "has_saved": bool(enc),
+            "username": username,
+            "cooldown_remaining_sec": max(0, int(self._pwd_cooldown_until - now)),
+        }
+
+    def _pwd_step(self, action) -> dict[str, Any]:
+        session = self._pwd_login
+        if session is None or session.expired():
+            self._pwd_login = None
+            self._pwd_creds = None
+            return {"status": "error",
+                    "message": "登录会话不存在或已过期，请重新开始"}
+        try:
+            res = action(session)
+        except PasswordLoginError as exc:
+            self._pwd_fail("xiaomi password login step failed", exc)
+            return {"status": "error", "message": str(exc)}
+        return self._pwd_route_result(session, res)
+
+    def _pwd_route_result(self, session: PasswordLoginSession,
+                          res: dict[str, Any]) -> dict[str, Any]:
+        if res.get("status") == "ok":
+            return self._pwd_finish(session)
+        res.setdefault("stage", session.stage)
+        return res
+
+    def _pwd_finish(self, session: PasswordLoginSession) -> dict[str, Any]:
+        creds = self._pwd_creds or {}
+        payload = {
+            "passToken": session.result.get("passToken", ""),
+            "userId": session.result.get("userId", ""),
+            "cUserId": session.result.get("cUserId", ""),
+            "deviceId": session.result.get("deviceId", ""),
+        }
+        try:
+            self.import_longterm(payload)
+        except Exception as exc:
+            self._pwd_fail("xiaomi password login import failed", exc)
+            return {"status": "error", "message": f"票据导入失败: {exc}"}
+        # 密码预填凭据：记住 → 信封加密落盘；未记住 → 清除旧值（密码即用即弃）
+        username = str(creds.get("user") or "")
+        if creds.get("remember") and creds.get("password"):
+            try:
+                enc = crypto_box.seal_text(
+                    self._pwd_key(), str(creds["password"]),
+                    aad=f"{self._PASSWORD_AAD}{self.account_id}")
+                self.store.save_login_secret(username, enc)
+            except Exception as exc:
+                logger.warning("xiaomi login password persist failed: %s", exc)
+        else:
+            self.store.save_login_secret(username, None)
+        self._pwd_login = None
+        self._pwd_creds = None
+        logger.info("xiaomi password login ok, account=%s userId=%s",
+                    self.account_id, payload["userId"])
+        return {"status": "ok", "message": "密码登录成功，长效会话已导入",
+                "userId": payload["userId"]}
+
+    def _pwd_fail(self, log_msg: str, exc: Exception) -> None:
+        self._pwd_login = None
+        self._pwd_creds = None
+        self._pwd_cooldown_until = time.time() + self.PASSWORD_LOGIN_COOLDOWN_SEC
+        logger.warning("%s: %s", log_msg, exc)
 
     def try_longterm_renew(self) -> bool:
         """长效票静默重签：成功落盘新 serviceToken 并重建 client。
@@ -499,12 +702,18 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
             else:
                 logger.warning("xiaomi longterm renew transient failure: %s", exc)
             return False
-        self.store.save(cookies)  # longterm 块由 save 自动保留
+        # 合并旧会话（保留 userId 等身份 cookie）+ 重签结果 + 票据身份字段，
+        # 再落盘——renew() 的 STS 链可能只回传 serviceToken
+        existing = self.store.load_cookies()
+        merged = self._fill_session_identity(
+            {**existing, **cookies}, str(lt.get("user_id") or ""),
+            str(lt.get("c_user_id") or ""), str(lt.get("device_id") or ""))
+        self.store.save(merged)  # longterm 块由 save 自动保留
         lt = self.store.load_longterm() or lt
         lt["last_renew_at"] = now
         lt["rounds"] = int(lt.get("rounds") or 0) + 1
         self.store.save_longterm(lt)
-        self._client = self._new_client(cookies)
+        self._client = self._new_client(merged)
         self._client_file_mtime = self._auth_file_mtime()
         self._longterm_cooldown_until = 0.0
         logger.info("xiaomi longterm renewed, account=%s rounds=%s",
@@ -610,11 +819,24 @@ class XiaomiProvider:
         XiaomiAPIError 原样上抛，由 daemon 的 transient 分支处理（不计失效）。
         T31.9：探活成功且会话超龄时预防性静默续签（失败不影响本次结果，
         冷却机制防止高频重试触发风控升级）。
+        T40 真机（2026-11-23）：serviceToken 实际寿命可短于主动续期阈值
+        （实测 ~21 分钟即 401，阈值原 25 分钟）——401 被动路径必须兜底
+        try_longterm_renew，否则客户端内部 resign（jar 无 passToken）必然
+        skipped，心跳在「resign skipped → 401」里无限空转。
         """
         client = self.auth_strategy.get_session_if_present()
         if client is None:
             raise AuthExpiredError("小米会话未导入或无效")
-        client.get_album_list()  # XiaomiAuthExpiredError（AuthExpiredError 子类）自然上抛
+        try:
+            client.get_album_list()  # XiaomiAuthExpiredError（AuthExpiredError 子类）自然上抛
+        except AuthExpiredError:
+            # 长效模式下 401 = serviceToken 过期而非票据死亡：先静默续签再重探活
+            if not self.auth_strategy.try_longterm_renew():
+                raise
+            client = self.auth_strategy.get_session_if_present()
+            if client is None:
+                raise AuthExpiredError("小米会话未导入或无效")
+            client.get_album_list()  # 续签后仍失败 → 上抛（票据真死了）
         if client.session_age_sec() > self.SESSION_REFRESH_MAX_AGE_SEC:
             if client.refresh_session():
                 logger.info(
@@ -679,11 +901,14 @@ class XiaomiProvider:
         遍历策略：timeline(dayCount) 拿全部日期 → 每天 galleries 翻页
         （小米默认 pageSize=30，引擎 page_size=100 也可接受）。
         若 timeline 为空则直接用 startDate=19700101 宽日期区间翻页。
+        T41：长扫描中途 token 过期（serviceToken ~21 分钟寿命 < 全量扫描时长）
+        时经 _auth_retry 兜底续签，lambda 内重调 _client() 取续签后的新实例，
+        整轮不中止。
         """
-        client = self._client()
-
         # 日期集合
-        day_count = client.get_timeline(album_id) if album_id else {}
+        day_count = self._auth_retry(
+            lambda: self._client().get_timeline(album_id)
+        ) if album_id else {}
         dates = sorted(day_count.keys()) if day_count else []
 
         if not dates:
@@ -693,12 +918,15 @@ class XiaomiProvider:
         for date_str in dates:
             page_num = 0
             while True:
-                resp = client.get_photo_page(
-                    date_str, date_str,
-                    page_num=page_num,
-                    page_size=page_size,
-                    album_id=album_id,
+                resp = self._auth_retry(
+                    lambda: self._client().get_photo_page(
+                        date_str, date_str,
+                        page_num=page_num,
+                        page_size=page_size,
+                        album_id=album_id,
+                    )
                 )
+                client = self._client()  # 续签后取新实例（stub 转换保持同票）
                 data = resp.get("data") or {}
                 items = list(data.get("galleries") or data.get("photos") or [])
                 stubs = [self._photo_to_stub(p, album_id, album_name, client) for p in items]

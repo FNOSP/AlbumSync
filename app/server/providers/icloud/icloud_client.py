@@ -56,6 +56,8 @@ PENDING_TTL_SEC = 600.0
 _SRP_FIELDS = {"salt", "b", "c", "iteration", "protocol"}
 # 认证失败后的自动重试退避：避免 daemon 高频重登持续喂给 Apple 风控。
 _AUTH_RETRY_BACKOFF_SEC = 120.0
+# 心跳连接抖动重试退避（T42）：瞬时 DNS/TCP 失败重试一次即恢复，单发不告警。
+_HEARTBEAT_RETRY_BACKOFF_SEC = 4.0
 
 
 class AlbumSyncPyiCloudService(PyiCloudService):
@@ -476,7 +478,27 @@ class ICloudClient:
             self.list_albums()
             return True
         except Exception as exc:
+            if not self._is_connection_error(exc):
+                raise self._translate(exc) from exc
+        # T42：瞬时连接抖动（DNS/TCP 偶发失败）自动重试一次——单发抖动不再
+        # 产生 WARNING；持续断网时重试仍失败，照常上抛由 daemon 警告。
+        time.sleep(_HEARTBEAT_RETRY_BACKOFF_SEC)
+        try:
+            self.list_albums()
+        except Exception as exc:
             raise self._translate(exc) from exc
+        logger.info("icloud heartbeat recovered on retry, account=%s", self.apple_id)
+        return True
+
+    @staticmethod
+    def _is_connection_error(exc: Exception) -> bool:
+        """连接类异常（区别于鉴权/协议错误）：值得重试一次的瞬时网络抖动。"""
+        return isinstance(exc, (
+            PyiCloudConnectionErrorException,
+            PyiCloudConnectionException,
+            PyiCloudServiceUnavailableException,
+            requests.RequestException,
+        ))
 
     @staticmethod
     def _album_id(name: str, album: Any) -> str:

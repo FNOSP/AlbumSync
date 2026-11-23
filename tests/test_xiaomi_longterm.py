@@ -18,7 +18,7 @@ from unittest.mock import patch
 SERVER_DIR = Path(__file__).resolve().parent.parent / "app" / "server"
 sys.path.insert(0, str(SERVER_DIR))
 
-from providers.xiaomi import XiaomiAuthStrategy  # noqa: E402
+from providers.xiaomi import XiaomiAuthStrategy, XiaomiProvider  # noqa: E402
 from providers.xiaomi.longterm import (  # noqa: E402
     LongtermRenewer,
     LongtermSessionError,
@@ -186,7 +186,7 @@ class StrategyLongtermTest(unittest.TestCase):
             (200, _sl_body(), {}, ""),
             (302, b"", {"Set-Cookie": "serviceToken=ST1; Path=/", "Location": "https://i.mi.com/"}, ""),
             (200, b"ok", _sts_headers(), "https://i.mi.com/"),
-        ]
+        ] * 2  # 双次换发校验：import 连跑两轮 renew
         with _patch_http(calls, responses):
             session = self.strategy.import_longterm({
                 "passToken": PASS_TOKEN, "userId": USER_ID,
@@ -200,6 +200,45 @@ class StrategyLongtermTest(unittest.TestCase):
         state = self.strategy.longterm_state()
         self.assertTrue(state["enabled"])
         self.assertFalse(state["dead"])
+
+    def test_import_longterm_onetime_ticket_rejected(self):
+        """扫码一次性票：第一轮换发成功、第二轮 70016 → 导入拒绝并指路。"""
+        responses = [
+            (401, _anon_body("Ib3%3D"), {}, ""),
+            (200, _sl_body(), {}, ""),
+            (302, b"", {"Set-Cookie": "serviceToken=ST1; Path=/", "Location": "https://i.mi.com/"}, ""),
+            (200, b"ok", _sts_headers(), "https://i.mi.com/"),
+            (401, _anon_body("Ib3%3D"), {}, ""),
+            (200, _sl_body(code=70016), {}, ""),
+        ]
+        calls = []
+        with _patch_http(calls, responses):
+            with self.assertRaises(Exception) as ctx:
+                self.strategy.import_longterm({"passToken": PASS_TOKEN, "userId": USER_ID})
+        self.assertIn("一次性票据", str(ctx.exception))
+        data = self.strategy.store.load()
+        self.assertTrue(not data or not data.get("longterm"))
+
+    def test_import_generates_stable_device_id_when_missing(self):
+        """导入缺 deviceId 时生成 wb_+UUID 并持久化（固定设备标识降风控）。"""
+        responses = [
+            (401, _anon_body("Ib3%3D"), {}, ""),
+            (200, _sl_body(), {}, ""),
+            (302, b"", {"Set-Cookie": "serviceToken=ST1; Path=/", "Location": "https://i.mi.com/"}, ""),
+            (200, b"ok", _sts_headers(), "https://i.mi.com/"),
+        ] * 2
+        calls = []
+        with _patch_http(calls, responses):
+            self.strategy.import_longterm({"passToken": PASS_TOKEN, "userId": USER_ID})
+        lt = self.strategy.store.load().get("longterm") or {}
+        did = str(lt.get("device_id") or "")
+        self.assertTrue(did.startswith("wb_"), "缺省 deviceId 必须是 wb_+UUID 仿真机格式")
+        self.assertRegex(did[3:], r"^[0-9a-f-]{36}$")
+        # 两轮 renew 的 serviceLogin 请求都带了同一固定 deviceId
+        sl_calls = [c for c in calls if "serviceLogin" in c["url"]]
+        self.assertTrue(sl_calls)
+        for c in sl_calls:
+            self.assertIn("deviceId=%s" % did, c["cookie"])
 
     def test_import_longterm_dead_token_gives_guidance(self):
         responses = [
@@ -282,6 +321,99 @@ class StrategyLongtermTest(unittest.TestCase):
             self.assertFalse(self.strategy.try_longterm_renew())
             # 冷却期内不再发起网络请求（responses 已耗尽，若请求会抛 StopIteration）
             self.assertFalse(self.strategy.try_longterm_renew())
+
+
+class ProviderHeartbeatRecoverTest(unittest.TestCase):
+    """T40 真机回归：心跳 401（serviceToken 短于主动续期阈值死亡）必须兜底
+    try_longterm_renew，否则 resign skipped 空转永不恢复。"""
+
+    class _StubClient:
+        def __init__(self, fail_first=True):
+            self.calls = 0
+            self.fail_first = fail_first
+
+        def get_album_list(self):
+            from hwcloudpd.models import AuthExpiredError
+            self.calls += 1
+            if self.calls == 1 and self.fail_first:
+                raise AuthExpiredError("HTTP 401 会话失效")
+            return []
+
+        def session_age_sec(self):
+            return 0
+
+    def _make_provider(self, tmp_name):
+        tmp = Path(tempfile.mkdtemp(prefix=tmp_name))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        provider = XiaomiProvider(None, {"id": "acc-hb", "auth_file": str(tmp / "a.json")})
+        stub = self._StubClient()
+        provider.auth_strategy.get_session_if_present = lambda: stub
+        return provider, stub
+
+    def test_heartbeat_401_recovers_via_longterm_renew(self):
+        provider, stub = self._make_provider("xiaomi-hb-")
+        renew_calls = []
+        provider.auth_strategy.try_longterm_renew = lambda: (renew_calls.append(1) or True)
+        self.assertTrue(provider.heartbeat_check())
+        self.assertEqual(len(renew_calls), 1)
+        self.assertEqual(stub.calls, 2)  # 首次 401 + 续签后重探活
+
+    def test_heartbeat_401_renew_fail_raises(self):
+        from hwcloudpd.models import AuthExpiredError
+        provider, stub = self._make_provider("xiaomi-hb2-")
+        provider.auth_strategy.try_longterm_renew = lambda: False
+        with self.assertRaises(AuthExpiredError):
+            provider.heartbeat_check()
+        self.assertEqual(stub.calls, 1)  # 续签失败不重探活
+
+
+class ProviderIterAuthRetryTest(unittest.TestCase):
+    """T41 回归：长扫描中途 401 → _auth_retry 续签 → 同轮恢复继续翻页。"""
+
+    class FakeClient:
+        def __init__(self, fail_on_page=None, prefix="A"):
+            self.fail_on_page = fail_on_page
+            self.pages = 0
+            self.prefix = prefix
+
+        def get_timeline(self, album_id):
+            return {"20240101": 2}
+
+        def get_photo_page(self, start, end, page_num=0, page_size=100, album_id=None):
+            from hwcloudpd.models import AuthExpiredError
+            self.pages += 1
+            if self.pages == self.fail_on_page:
+                raise AuthExpiredError("HTTP 401 会话失效")
+            return {"data": {"galleries": [
+                {"id": f"{self.prefix}-p{self.pages}", "fileName": "a.jpg"},
+            ], "isLastPage": True}}
+
+        def resolve_album_name(self, aid):
+            return "A"
+
+    def test_iter_recovers_mid_scan(self):
+        from hwcloudpd.models import AuthExpiredError  # noqa: F401 供 FakeClient 引用
+        tmp = Path(tempfile.mkdtemp(prefix="xiaomi-iter-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        provider = XiaomiProvider(None, {"id": "acc-iter", "auth_file": str(tmp / "a.json")})
+        client_a = self.FakeClient(fail_on_page=1, prefix="A")
+        client_b = self.FakeClient(prefix="B")
+        holder = {"c": client_a}
+        renew = {"n": 0}
+
+        provider.auth_strategy.ensure_session = lambda probe=False: holder["c"]
+
+        def renew_swap():
+            renew["n"] += 1
+            holder["c"] = client_b  # 续签后换新 client
+            return True
+
+        provider.auth_strategy.try_longterm_renew = renew_swap
+        provider._photo_to_stub = lambda p, aid, aname, client: str(p["id"])
+
+        pages = [s for batch in provider.iter_simple_files(None) for s in batch]
+        self.assertEqual(renew["n"], 1, "中途 401 必须触发一次续签")
+        self.assertEqual(pages, ["B-p1"], "续签后同一轮继续翻页且使用新 client")
 
 
 if __name__ == "__main__":

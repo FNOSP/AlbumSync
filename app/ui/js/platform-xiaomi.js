@@ -46,13 +46,48 @@ PlatformUI.register("xiaomi", {
         <div id="qr-qr-area" style="display:none;text-align:center;margin-top:14px"></div>
         <div id="qr-msg" style="margin-top:10px"></div>
       </div>
+      <div class="card" id="pwd-login-card">
+        <h2>账号密码登录 <span class="hint">产出长效票，免扫码不掉线</span></h2>
+        <div class="tip" style="display:block;line-height:1.7">
+          账号密码登录签发的 passToken 与浏览器「信任设备」等价：导入后每 25 分钟自动静默续期，<b>不再掉线</b>。
+          ⚠️ 服务器/异地 IP 登录触发图形验证码或短信/邮箱二次验证的概率较高，属正常现象，按提示完成即可；失败后有 30 分钟冷却。
+        </div>
+        <div class="grid" style="grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+          <label>账号（手机号/邮箱/小米ID）<input id="pwd-user" placeholder="手机号 / 邮箱 / 小米ID" autocomplete="off"></label>
+          <label>密码 <input id="pwd-pass" type="password" placeholder="小米账号密码" autocomplete="off"></label>
+        </div>
+        <div style="display:flex;gap:16px;align-items:center;margin-top:8px;flex-wrap:wrap">
+          <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="pwd-remember"> 记住密码（仅本机加密保存，供下次登录预填）</label>
+          <label style="display:none;gap:6px;align-items:center" id="pwd-usesaved-row"><input type="checkbox" id="pwd-usesaved"> 使用已保存的密码</label>
+        </div>
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn primary" id="btn-pwd-start" onclick="pwdLoginStart()">开始登录</button>
+        </div>
+        <div id="pwd-captcha-area" style="display:none;margin-top:10px">
+          <img id="pwd-captcha-img" alt="图形验证码" style="border:1px solid var(--border);border-radius:6px;max-height:80px">
+          <div class="grid" style="grid-template-columns:1fr auto;gap:10px;margin-top:8px">
+            <label>图形验证码 <input id="pwd-captcha-code" placeholder="输入图中字符" autocomplete="off"></label>
+            <button class="btn" id="btn-pwd-captcha" style="align-self:end" onclick="pwdLoginCaptcha()">提交验证码</button>
+          </div>
+        </div>
+        <div id="pwd-2fa-area" style="display:none;margin-top:10px">
+          <div class="tip" id="pwd-2fa-tip" style="display:block"></div>
+          <div class="grid" style="grid-template-columns:1fr auto;gap:10px;margin-top:8px">
+            <label>验证码 <input id="pwd-2fa-code" placeholder="短信/邮箱验证码" autocomplete="off"></label>
+            <button class="btn" id="btn-pwd-verify" style="align-self:end" onclick="pwdLoginVerify()">提交验证码</button>
+          </div>
+        </div>
+        <div id="pwd-msg" style="margin-top:10px"></div>
+      </div>
       <div class="card" id="longterm-card">
         <h2>长效会话（免扫码） <span class="hint">导入一次，自动静默续期，不再掉线</span></h2>
         <div id="longterm-tip" class="tip" style="display:block;line-height:1.7">
-          从<strong>已登录 i.mi.com 且能正常看照片</strong>的浏览器复制账号域长效票据（passToken）。
-          导入后 daemon 会立即换发验证，之后每 25 分钟自动静默续期，<b>不再需要扫码</b>（passToken 有效期通常数天~数周）。
+          从<strong>用密码登录（信任设备）i.mi.com</strong> 的浏览器复制账号域长效票据（passToken）。
+          ⚠️ 扫码登录签发的票据是一次性的（换发一次即作废），导入时会做双次换发校验并拒绝。
+          导入后每 25 分钟自动静默续期，<b>不再需要扫码</b>（passToken 有效期通常数天~数周）。
           <br>获取步骤：F12 → <b>Application（应用）</b> → 左侧 <b>Cookies → https://account.xiaomi.com</b>（注意是 account 域，不是 i.mi.com）→ 复制
           <b>passToken</b>、<b>userId</b>、<b>cUserId</b>、<b>deviceId</b>、<b>serviceToken</b>（2.0&amp;V1_passport 开头那份）的值分别填入下方。
+          <br>若导入报「passToken 已失效」：说明浏览器会话的票已过期，退出后重新用密码登录再复制。
         </div>
         <div class="grid" style="grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
           <label>userId（数字 ID）<input id="lt-user-id" placeholder="如 196519672"></label>
@@ -68,8 +103,11 @@ PlatformUI.register("xiaomi", {
       </div>`;
   },
 
-  /* -- 认证状态到达：风控限流倒计时横幅（T31.10） -- */
-  onAuthRefresh(a) { renderRiskBanner(a && a.risk); },
+  /* -- 认证状态到达：风控限流倒计时横幅（T31.10）+ 密码登录预填状态 -- */
+  onAuthRefresh(a) {
+    renderRiskBanner(a && a.risk);
+    pwdStatusLoad();
+  },
 
   /* -- cURL 导入卡文案 -- */
   applyCurlCopy() {
@@ -138,6 +176,98 @@ async function longtermImport() {
   } finally {
     btn.disabled = false;
   }
+}
+
+/* ---------- 账号密码登录（T38：Auth2 + 图形验证码 + identity 2FA） ---------- */
+
+async function pwdStatusLoad() {
+  const id = curId(); if (!id) return;
+  let r;
+  try {
+    r = (await api(`accounts/${id}/auth/password-login/status`)).pwd || {};
+  } catch (e) { return; }
+  const row = $("pwd-usesaved-row");
+  if (!row) return;
+  row.style.display = r.has_saved ? "flex" : "none";
+  if (r.has_saved && !$("pwd-user").value) $("pwd-user").value = r.username || "";
+}
+
+function pwdApplyResult(r) {
+  if (r.status === "ok") {
+    $("pwd-captcha-area").style.display = "none";
+    $("pwd-2fa-area").style.display = "none";
+    $("pwd-msg").innerHTML = `<div class="banner" style="background:#e7f6ee;color:#147a45;border:1px solid #bfe8d1">${esc(r.message || "密码登录成功，长效会话已导入")}</div>`;
+    toast("密码登录成功", "ok");
+    refreshAuth();
+    return true;
+  }
+  if (r.status === "captcha") {
+    $("pwd-2fa-area").style.display = "none";
+    $("pwd-captcha-img").src = r.image;
+    $("pwd-captcha-area").style.display = "";
+    $("pwd-msg").innerHTML = `<div class="banner">需要图形验证码，请输入图中字符后提交。</div>`;
+    return false;
+  }
+  if (r.status === "2fa") {
+    $("pwd-captcha-area").style.display = "none";
+    $("pwd-2fa-area").style.display = "";
+    $("pwd-2fa-tip").innerHTML =
+      `已向 <b>${esc(r.target || ("绑定" + (r.channel === "email" ? "邮箱" : "手机号")))}</b> 发送验证码，请查收并输入（验证码 10 分钟内有效）。`;
+    $("pwd-msg").innerHTML = "";
+    return false;
+  }
+  return false;
+}
+
+async function pwdLoginStart() {
+  const id = curId(); if (!id) return;
+  const btn = $("btn-pwd-start"); btn.disabled = true;
+  $("pwd-msg").innerHTML = `<span class="spin"></span> 正在登录…`;
+  try {
+    const r = await api(`accounts/${id}/auth/password-login/start`, { method: "POST", body: {
+      user: ($("pwd-user").value || "").trim(),
+      password: $("pwd-pass").value || "",
+      rememberPassword: $("pwd-remember").checked,
+      useSaved: $("pwd-usesaved").checked,
+    }});
+    if (!pwdApplyResult(r) && r.status === "error") {
+      $("pwd-msg").innerHTML = `<div class="banner err">${esc(r.message || "登录失败")}</div>`;
+    }
+  } catch (e) {
+    $("pwd-msg").innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
+  } finally { btn.disabled = false; }
+}
+
+async function pwdLoginCaptcha() {
+  const id = curId(); if (!id) return;
+  const code = ($("pwd-captcha-code").value || "").trim();
+  if (!code) { $("pwd-msg").innerHTML = `<div class="banner err">请输入图中验证码</div>`; return; }
+  const btn = $("btn-pwd-captcha"); btn.disabled = true;
+  $("pwd-msg").innerHTML = `<span class="spin"></span> 正在提交验证码…`;
+  try {
+    const r = await api(`accounts/${id}/auth/password-login/captcha`, { method: "POST", body: { code } });
+    if (!pwdApplyResult(r) && r.status === "error") {
+      $("pwd-msg").innerHTML = `<div class="banner err">${esc(r.message || "验证码校验失败")}</div>`;
+    }
+  } catch (e) {
+    $("pwd-msg").innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
+  } finally { btn.disabled = false; }
+}
+
+async function pwdLoginVerify() {
+  const id = curId(); if (!id) return;
+  const code = ($("pwd-2fa-code").value || "").trim();
+  if (!code) { $("pwd-msg").innerHTML = `<div class="banner err">请输入收到的验证码</div>`; return; }
+  const btn = $("btn-pwd-verify"); btn.disabled = true;
+  $("pwd-msg").innerHTML = `<span class="spin"></span> 正在校验…`;
+  try {
+    const r = await api(`accounts/${id}/auth/password-login/verify`, { method: "POST", body: { code } });
+    if (!pwdApplyResult(r) && r.status === "error") {
+      $("pwd-msg").innerHTML = `<div class="banner err">${esc(r.message || "校验失败")}</div>`;
+    }
+  } catch (e) {
+    $("pwd-msg").innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
+  } finally { btn.disabled = false; }
 }
 
 /* ---------- 扫码登录（模块自治，模板内联 onclick 调用） ---------- */
