@@ -141,7 +141,7 @@ async function iCloudWebLogin() {
       $("icloud-login-output").innerHTML = `<div class="banner warn">${esc(r.message)}</div>`;
       iCloudShowChallenge({ channels: r.channels || [] }, "请输入收到的 6 位验证码：", true);
     } else {
-      $("icloud-login-output").innerHTML = `<div class="banner" style="background:#e7f6ee;color:#147a45;border:1px solid #bfe8d1">${esc(r.message)}</div>`;
+      $("icloud-login-output").innerHTML = `<div class="banner ok">${esc(r.message)}</div>`;
       toast("iCloud 登录成功", "ok");
     }
   } catch (e) {
@@ -164,7 +164,7 @@ async function iCloudSubmit2fa() {
       toast("验证码校验未通过", "err");
     } else {
       $("icloud-twofa-panel").style.display = "none";
-      $("icloud-login-output").innerHTML = `<div class="banner" style="background:#e7f6ee;color:#147a45;border:1px solid #bfe8d1">${esc(r.message)}</div>`;
+      $("icloud-login-output").innerHTML = `<div class="banner ok">${esc(r.message)}</div>`;
       toast("Apple 二次验证通过", "ok");
     }
   } catch (e) {

@@ -1,5 +1,5 @@
 appname                    = AlbumSync
-version                    = 0.3.30
+version                    = 0.3.31
 display_name               = 相册同步
 desc                       = """多云相册备份到飞牛 NAS。支持多账号：同一平台可添加多个账号，各自独立管理相册选择、存储目录、调度与登录态，账号间完全隔离、互不干扰，配置保存按账号热生效。华为云空间支持两种登录：浏览器会话 cURL 导入（免密码）与账号密码登录（短信/邮箱二次验证码在网页提交，信任设备后静默重登）。小米云相册（i.mi.com）支持浏览器 cookie 导入（免密码，不支持自动重登）。iCloud 云相册支持 Apple ID/密码登录、双重认证/两步验证及国际区/中国区。同步能力：按相册/文件类型/时间范围过滤、增量下载、目录结构模板、删除镜像策略、并发与限速、cron 定时同步、dry-run 预览、Webhook 通知。账号密码使用机器密钥加密落盘（config 仅存密文），并支持口令加密的凭据备份导出/导入（.asbak，可在全局设置中配置备份目录）。内置 Web 管理界面（账号管理/状态总览/全局设置/单账号工作区）。华为/小米同步引擎基于上游开源项目 hwcloudpd；iCloud 协议复用随包 vendor 的 icloud_photos_downloader 及其纯 Python 依赖，无需 venv/pip 或 NAS 额外安装。开源地址：https://github.com/tuber0613/hwcloudpd"""
 platform                   = x86
@@ -17,6 +17,13 @@ checkport                  = true
 install_dep_apps           = python311
 disable_authorization_path = true
 changelog                  = """
+- 0.3.31 Web 界面样式修复 + 数据库统计修复：补 .banner.ok 成功态类（8 处 JS 内联样式收编）；小米
+  长效票据/密码登录卡内联两列网格改为响应式类（640px 以下折叠单列）；卡片标题
+  flex-wrap 防窄屏溢出；移动端输入框 16px 防 iOS 聚焦放大；键盘焦点可见
+  （focus-visible）；禁用态数字输入对比度修正；验证码图片宽度上限；平台卡 label
+  字号与 .field 对齐；修复「数据库统计」恒为空——前端状态白名单缺 downloaded 键
+  （引擎账本唯一实际状态），统计卡片自上线起从未显示过数据；小米卡文案续期频率
+  25→15 分钟对齐 0.3.30 实际阈值
 - 0.3.30 修复长扫描中途 401 整轮中止（T40 真机验证暴露）+ iCloud 心跳抖动降噪：
   ① 小米 serviceToken 实测寿命 ~21 分钟短于原 25 分钟主动续期阈值——阈值降至
   15 分钟，且心跳/分页/下载全路径接入 _auth_retry 请求级兜底（401 → 长效续签 →

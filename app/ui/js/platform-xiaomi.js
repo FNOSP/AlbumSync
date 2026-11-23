@@ -49,10 +49,10 @@ PlatformUI.register("xiaomi", {
       <div class="card" id="pwd-login-card">
         <h2>账号密码登录 <span class="hint">产出长效票，免扫码不掉线</span></h2>
         <div class="tip" style="display:block;line-height:1.7">
-          账号密码登录签发的 passToken 与浏览器「信任设备」等价：导入后每 25 分钟自动静默续期，<b>不再掉线</b>。
+          账号密码登录签发的 passToken 与浏览器「信任设备」等价：导入后每 15 分钟自动静默续期，<b>不再掉线</b>。
           ⚠️ 服务器/异地 IP 登录触发图形验证码或短信/邮箱二次验证的概率较高，属正常现象，按提示完成即可；失败后有 30 分钟冷却。
         </div>
-        <div class="grid" style="grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+        <div class="lt-grid">
           <label>账号（手机号/邮箱/小米ID）<input id="pwd-user" placeholder="手机号 / 邮箱 / 小米ID" autocomplete="off"></label>
           <label>密码 <input id="pwd-pass" type="password" placeholder="小米账号密码" autocomplete="off"></label>
         </div>
@@ -64,15 +64,15 @@ PlatformUI.register("xiaomi", {
           <button class="btn primary" id="btn-pwd-start" onclick="pwdLoginStart()">开始登录</button>
         </div>
         <div id="pwd-captcha-area" style="display:none;margin-top:10px">
-          <img id="pwd-captcha-img" alt="图形验证码" style="border:1px solid var(--border);border-radius:6px;max-height:80px">
-          <div class="grid" style="grid-template-columns:1fr auto;gap:10px;margin-top:8px">
+          <img id="pwd-captcha-img" class="pwd-captcha-img" alt="图形验证码">
+          <div class="lt-grid-btn">
             <label>图形验证码 <input id="pwd-captcha-code" placeholder="输入图中字符" autocomplete="off"></label>
             <button class="btn" id="btn-pwd-captcha" style="align-self:end" onclick="pwdLoginCaptcha()">提交验证码</button>
           </div>
         </div>
         <div id="pwd-2fa-area" style="display:none;margin-top:10px">
           <div class="tip" id="pwd-2fa-tip" style="display:block"></div>
-          <div class="grid" style="grid-template-columns:1fr auto;gap:10px;margin-top:8px">
+          <div class="lt-grid-btn">
             <label>验证码 <input id="pwd-2fa-code" placeholder="短信/邮箱验证码" autocomplete="off"></label>
             <button class="btn" id="btn-pwd-verify" style="align-self:end" onclick="pwdLoginVerify()">提交验证码</button>
           </div>
@@ -84,12 +84,12 @@ PlatformUI.register("xiaomi", {
         <div id="longterm-tip" class="tip" style="display:block;line-height:1.7">
           从<strong>用密码登录（信任设备）i.mi.com</strong> 的浏览器复制账号域长效票据（passToken）。
           ⚠️ 扫码登录签发的票据是一次性的（换发一次即作废），导入时会做双次换发校验并拒绝。
-          导入后每 25 分钟自动静默续期，<b>不再需要扫码</b>（passToken 有效期通常数天~数周）。
+          导入后每 15 分钟自动静默续期，<b>不再需要扫码</b>（passToken 有效期通常数天~数周）。
           <br>获取步骤：F12 → <b>Application（应用）</b> → 左侧 <b>Cookies → https://account.xiaomi.com</b>（注意是 account 域，不是 i.mi.com）→ 复制
           <b>passToken</b>、<b>userId</b>、<b>cUserId</b>、<b>deviceId</b>、<b>serviceToken</b>（2.0&amp;V1_passport 开头那份）的值分别填入下方。
           <br>若导入报「passToken 已失效」：说明浏览器会话的票已过期，退出后重新用密码登录再复制。
         </div>
-        <div class="grid" style="grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+        <div class="lt-grid">
           <label>userId（数字 ID）<input id="lt-user-id" placeholder="如 196519672"></label>
           <label>cUserId<input id="lt-c-user-id" placeholder="可从同表格复制"></label>
           <label>deviceId<input id="lt-device-id" placeholder="wb_ 开头"></label>
@@ -167,7 +167,7 @@ async function longtermImport() {
   try {
     const r = await api(`accounts/${id}/auth/import-longterm`, { method: "POST", body: payload });
     if (r.status === "ok") {
-      $("lt-msg").innerHTML = `<div class="banner" style="background:#e7f6ee;color:#147a45;border:1px solid #bfe8d1">${esc(r.message)}（userId=${esc(r.user_id || "")}）</div>`;
+      $("lt-msg").innerHTML = `<div class="banner ok">${esc(r.message)}（userId=${esc(r.user_id || "")}）</div>`;
     } else {
       $("lt-msg").innerHTML = `<div class="banner err">${esc(r.message || "导入失败")}</div>`;
     }
@@ -196,7 +196,7 @@ function pwdApplyResult(r) {
   if (r.status === "ok") {
     $("pwd-captcha-area").style.display = "none";
     $("pwd-2fa-area").style.display = "none";
-    $("pwd-msg").innerHTML = `<div class="banner" style="background:#e7f6ee;color:#147a45;border:1px solid #bfe8d1">${esc(r.message || "密码登录成功，长效会话已导入")}</div>`;
+    $("pwd-msg").innerHTML = `<div class="banner ok">${esc(r.message || "密码登录成功，长效会话已导入")}</div>`;
     toast("密码登录成功", "ok");
     refreshAuth();
     return true;
@@ -286,7 +286,7 @@ function renderRiskBanner(risk) {
     const leftSec = Math.floor(targetMs / 1000 - Date.now() / 1000);
     if (leftSec <= 0) {
       el.style.display = "";
-      el.innerHTML = `<div class="banner" style="background:#e7f6ee;color:#147a45;border:1px solid #bfe8d1">✅ 风控限流时间已过，现在可以重新扫码登录了（扫码确认后建议立即同步）。</div>`;
+      el.innerHTML = `<div class="banner ok">✅ 风控限流时间已过，现在可以重新扫码登录了（扫码确认后建议立即同步）。</div>`;
       if (_riskTimer) { clearInterval(_riskTimer); _riskTimer = null; }
       return;
     }
@@ -338,7 +338,7 @@ async function qrPollLoop() {
       break;
     }
     if (r.status === "confirmed") {
-      $("qr-msg").innerHTML = `<div class="banner" style="background:#e7f6ee;color:#147a45;border:1px solid #bfe8d1">扫码登录成功（userId=${esc(r.user_id || "")}），daemon 将在 15 秒内热重载。<br>会话约 15–35 分钟有效（小米风控限制）——建议立即到「同步状态」点「立即同步」。</div>`;
+      $("qr-msg").innerHTML = `<div class="banner ok">扫码登录成功（userId=${esc(r.user_id || "")}），daemon 将在 15 秒内热重载。<br>会话约 15–35 分钟有效（小米风控限制）——建议立即到「同步状态」点「立即同步」。</div>`;
       toast("扫码登录成功", "ok");
       refreshAuth();
       break;

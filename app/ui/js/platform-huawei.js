@@ -143,7 +143,7 @@ async function webLogin() {
       $("login-output").innerHTML = `<div class="banner warn">${esc(r.message)}</div>`;
       showTwoFa(r.channels, "请选择接收通道并输入验证码：");
     } else {
-      $("login-output").innerHTML = `<div class="banner" style="background:#e7f6ee;color:#147a45;border:1px solid #bfe8d1">${esc(r.message)}</div>`;
+      $("login-output").innerHTML = `<div class="banner ok">${esc(r.message)}</div>`;
       toast("登录成功", "ok");
     }
   } catch (e) {
@@ -165,7 +165,7 @@ async function submit2fa() {
       toast("验证码校验未通过", "err");
     } else {
       $("twofa-panel").style.display = "none";
-      $("login-output").innerHTML = `<div class="banner" style="background:#e7f6ee;color:#147a45;border:1px solid #bfe8d1">${esc(r.message)}</div>`;
+      $("login-output").innerHTML = `<div class="banner ok">${esc(r.message)}</div>`;
       toast("二次验证通过", "ok");
     }
   } catch (e) { toast(e.message, "err"); }
