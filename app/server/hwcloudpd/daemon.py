@@ -269,7 +269,7 @@ class SyncDaemon:
                 delay = 15.0
             await self._sleep_or_stop(delay)
 
-    async def execute_sync_once(self) -> SyncReport | None:
+    async def execute_sync_once(self, mode: str = "scheduled") -> SyncReport | None:
         """Run one sync cycle guarded by _sync_lock."""
         async with self._sync_lock:
             now_ts = time.time()
@@ -277,6 +277,12 @@ class SyncDaemon:
             if self.config.full_scan_interval_hours is not None and self.config.full_scan_interval_hours > 0:
                 if (now_ts - self._last_full_scan_at) >= self.config.full_scan_interval_hours * 3600.0:
                     force_full = True
+
+            logger.info(
+                "Sync started (mode=%s, scan=%s)",
+                mode,
+                "full" if force_full else "incremental",
+            )
 
             try:
                 engine = self._engine_factory()
@@ -334,7 +340,7 @@ class SyncDaemon:
             return
 
         if self.config.run_on_startup:
-            await self.execute_sync_once()
+            await self.execute_sync_once(mode="startup")
 
         while not self._stop_event.is_set():
             if not self._auth_valid:
@@ -366,6 +372,7 @@ class SyncDaemon:
                 timeout=wait_sec,
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            triggered = self._immediate_sync_event.is_set()
             self._immediate_sync_event.clear()
             for t in pending:
                 t.cancel()
@@ -380,7 +387,9 @@ class SyncDaemon:
             if not self._auth_valid:
                 continue
 
-            await self.execute_sync_once()
+            await self.execute_sync_once(
+                mode="immediate" if triggered else "scheduled"
+            )
 
     async def run_forever(self) -> None:
         """Start keep-alive and scheduler loops until SIGTERM/SIGINT."""

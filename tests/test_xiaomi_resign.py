@@ -409,7 +409,7 @@ class TestRiskState(ResignTestBase):
         stub = type("StubClient", (), {
             "get_download_meta": staticmethod(lambda pid: ("http://u", "m")),
             "download_to_file": staticmethod(
-                lambda url, meta, path, resume=True:
+                lambda url, meta, path, resume=True, refresh_meta=None:
                 Path(path).write_bytes(payload) or "downloaded"),
         })()
         prov._client = lambda: stub

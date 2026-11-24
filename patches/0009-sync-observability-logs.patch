@@ -1,0 +1,82 @@
+diff --git a/hwcloudpd/daemon.py b/hwcloudpd/daemon.py
+index 0ee0928..92989e5 100755
+--- a/hwcloudpd/daemon.py
++++ b/hwcloudpd/daemon.py
+@@ -269,7 +269,7 @@ class SyncDaemon:
+                 delay = 15.0
+             await self._sleep_or_stop(delay)
+ 
+-    async def execute_sync_once(self) -> SyncReport | None:
++    async def execute_sync_once(self, mode: str = "scheduled") -> SyncReport | None:
+         """Run one sync cycle guarded by _sync_lock."""
+         async with self._sync_lock:
+             now_ts = time.time()
+@@ -278,6 +278,12 @@ class SyncDaemon:
+                 if (now_ts - self._last_full_scan_at) >= self.config.full_scan_interval_hours * 3600.0:
+                     force_full = True
+ 
++            logger.info(
++                "Sync started (mode=%s, scan=%s)",
++                mode,
++                "full" if force_full else "incremental",
++            )
++
+             try:
+                 engine = self._engine_factory()
+                 report = await asyncio.to_thread(engine.run_once, force_full_scan=force_full)
+@@ -334,7 +340,7 @@ class SyncDaemon:
+             return
+ 
+         if self.config.run_on_startup:
+-            await self.execute_sync_once()
++            await self.execute_sync_once(mode="startup")
+ 
+         while not self._stop_event.is_set():
+             if not self._auth_valid:
+@@ -366,6 +372,7 @@ class SyncDaemon:
+                 timeout=wait_sec,
+                 return_when=asyncio.FIRST_COMPLETED,
+             )
++            triggered = self._immediate_sync_event.is_set()
+             self._immediate_sync_event.clear()
+             for t in pending:
+                 t.cancel()
+@@ -380,7 +387,9 @@ class SyncDaemon:
+             if not self._auth_valid:
+                 continue
+ 
+-            await self.execute_sync_once()
++            await self.execute_sync_once(
++                mode="immediate" if triggered else "scheduled"
++            )
+ 
+     async def run_forever(self) -> None:
+         """Start keep-alive and scheduler loops until SIGTERM/SIGINT."""
+diff --git a/hwcloudpd/sync.py b/hwcloudpd/sync.py
+index 4b49c85..b2e26a0 100755
+--- a/hwcloudpd/sync.py
++++ b/hwcloudpd/sync.py
+@@ -189,6 +189,7 @@ class SyncEngine:
+         pending: list[MediaStub] = []
+         consecutive_found = 0
+ 
++        page_no = 0
+         for page in self.client.iter_simple_files(
+             album_id,
+             album_name=album_name,
+@@ -198,6 +199,15 @@ class SyncEngine:
+             page_size=self.config.page_size,
+             request_delay_ms=self.config.request_delay_ms,
+         ):
++            page_no += 1
++            if page_no == 1 or page_no % 5 == 0:
++                logger.info(
++                    "scan progress: album=%s page=%d scanned=%d pending=%d",
++                    album_name or "timeline",
++                    page_no,
++                    report.scanned,
++                    len(pending),
++                )
+             stop_source = False
+             for raw_stub in page:
+                 if raw_stub.album_id in excluded_ids:

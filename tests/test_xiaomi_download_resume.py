@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""小米下载断点续传单测（T28.4）。
+"""小米下载断点续传单测（T28.4）+ 416 两段式容错（T45.2/T45.3）。
 
 本地 HTTP 服务模拟小米 download_file：
 - 无 Range 的 POST → 200 全量内容
 - 带 Range: bytes=N- → 206 + 剩余内容（模拟服务端支持续传）
 - Range 起点越界 → 416（触发删 part 重下）
 - ignore_range 开关 → 无视 Range 总回 200 全量（部分 CDN 行为）
+- fail_first_range_416 → 首次 Range 请求 416、之后正常（模拟预签 URL 失效假象）
 """
+import json
 import shutil
 import sys
 import tempfile
@@ -26,7 +28,15 @@ TEST_DOMAIN = "127.0.0.1"
 FULL_CONTENT = bytes(range(256)) * 16  # 4096 字节确定性内容
 
 
-def _make_handler(*, ignore_range: bool = False, range_416: bool = False, status: int = 200):
+def _make_handler(
+    *,
+    ignore_range: bool = False,
+    range_416: bool = False,
+    status: int = 200,
+    fail_first_range_416: bool = False,
+):
+    seen_ranges = {"count": 0}
+
     class _Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
@@ -39,6 +49,13 @@ def _make_handler(*, ignore_range: bool = False, range_416: bool = False, status
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
+            if fail_first_range_416 and range_header:
+                seen_ranges["count"] += 1
+                if seen_ranges["count"] == 1:
+                    self.send_response(416)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
             if range_header and range_416:
                 self.send_response(416)
                 self.send_header("Content-Length", "0")
@@ -136,6 +153,103 @@ class TestDownloadResume(XiaomiResumeTestBase):
         client = self._start_server(status=401)
         with self.assertRaises(XiaomiAuthExpiredError):
             client.download_to_file(self._url(), "meta", self.part)
+
+
+class Test416UrlRefresh(XiaomiResumeTestBase):
+    """T45.2/T45.3：416 两段式（先刷新 URL 重试 Range，仍 416 才删 part）。"""
+
+    def test_416_refreshes_url_then_resumes(self):
+        """首次 Range 416（预签 URL 失效假象）→ refresh_meta 刷新 → 206 续传保住断点。"""
+        client = self._start_server(fail_first_range_416=True)
+        self.part.write_bytes(FULL_CONTENT[:1000])
+        refreshes = {"n": 0}
+
+        def refresh_meta():
+            refreshes["n"] += 1
+            return (self._url(), "meta-refreshed")
+
+        outcome = client.download_to_file(
+            self._url(), "meta", self.part, resume=True, refresh_meta=refresh_meta,
+        )
+        self.assertEqual(outcome, "resumed", "刷新后必须 Range 续传而非全量重下")
+        self.assertEqual(refreshes["n"], 1)
+        self.assertEqual(self.part.read_bytes(), FULL_CONTENT, "断点字节必须保留并补齐")
+
+    def test_416_after_refresh_still_restarts_full(self):
+        """刷新 URL 后仍 416（part 真越界）→ 删 part 全量重下。"""
+        client = self._start_server(range_416=True)
+        self.part.write_bytes(b"stale-garbage")
+        outcome = client.download_to_file(
+            self._url(), "meta", self.part, resume=True,
+            refresh_meta=lambda: (self._url(), "meta-refreshed"),
+        )
+        self.assertEqual(outcome, "downloaded")
+        self.assertEqual(self.part.read_bytes(), FULL_CONTENT)
+
+    def test_416_without_refresh_keeps_legacy_behavior(self):
+        """无 refresh_meta（旧调用方）→ 保持原行为：416 直接删 part 全量重下。"""
+        client = self._start_server(range_416=True)
+        self.part.write_bytes(b"stale-garbage")
+        outcome = client.download_to_file(self._url(), "meta", self.part)
+        self.assertEqual(outcome, "downloaded")
+        self.assertEqual(self.part.read_bytes(), FULL_CONTENT)
+
+
+class TestDownloadPartRefreshesUrl(unittest.TestCase):
+    """T45.1：download_to_part 每轮（含重试轮）刷新一次性预签 URL。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="albumsync-t45p-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.part = self.tmp / "IMG_0001.jpg.aspart"
+        self.part.write_bytes(b"x")  # download_to_part 收尾要 stat/sha256
+
+        from providers.xiaomi import XiaomiProvider
+        auth = self.tmp / "auth.json"
+        auth.write_text(
+            json.dumps({"platform": "xiaomi", "cookies": {"userId": "1", "serviceToken": "t"}}),
+            encoding="utf-8",
+        )
+        prov = XiaomiProvider(None, {"id": "acc-t45", "auth_file": str(auth)})
+        self.provider = prov
+        self.calls = {"meta": 0}
+        self.recorded: list = []
+
+        class _StubClient:
+            def get_download_meta(self, photo_id):
+                self.calls["meta"] += 1
+                return (f"http://cdn/{photo_id}?sig={self.calls['meta']}", f"meta-{self.calls['meta']}")
+
+            def download_to_file(self, url, meta, path, *, resume=True, refresh_meta=None):
+                self.recorded.append((url, meta, refresh_meta))
+                return "downloaded"
+
+        sc = _StubClient()
+        sc.calls = self.calls
+        sc.recorded = self.recorded
+        self.provider._client = lambda: sc
+
+    def test_do_refreshes_url_and_passes_refresh_callback(self):
+        url = json.dumps({"url": "http://old/u", "meta": "old-m", "photo_id": "pid-1"})
+        self.provider.download_to_part(url, self.part)
+        self.assertEqual(self.calls["meta"], 1, "do() 内必须先刷新一次预签 URL")
+        got_url, got_meta, refresh_meta = self.recorded[0]
+        self.assertEqual(got_url, "http://cdn/pid-1?sig=1")
+        self.assertEqual(got_meta, "meta-1")
+        self.assertIsNotNone(refresh_meta, "416 回调必须交给 download_to_file")
+        self.assertEqual(
+            refresh_meta(), ("http://cdn/pid-1?sig=2", "meta-2"),
+            "refresh_meta 必须返回再次刷新的 URL/meta",
+        )
+
+    def test_legacy_json_without_photo_id_keeps_static_url(self):
+        """旧格式 JSON（无 photo_id）→ 兼容：不刷新、无 416 回调。"""
+        url = json.dumps({"url": "http://old/u", "meta": "old-m"})
+        self.provider.download_to_part(url, self.part)
+        self.assertEqual(self.calls["meta"], 0, "无 photo_id 不得刷新")
+        got_url, got_meta, refresh_meta = self.recorded[0]
+        self.assertEqual((got_url, got_meta), ("http://old/u", "old-m"))
+        self.assertIsNone(refresh_meta)
 
 
 if __name__ == "__main__":

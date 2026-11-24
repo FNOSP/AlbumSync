@@ -1,0 +1,75 @@
+diff --git a/hwcloudpd/postprocess.py b/hwcloudpd/postprocess.py
+index 91f96c6..1da6b83 100755
+--- a/hwcloudpd/postprocess.py
++++ b/hwcloudpd/postprocess.py
+@@ -79,6 +79,15 @@ def resolve_target_path(
+         if abs_candidate.exists():
+             if existing is not None and existing["unique_id"] == item.unique_id:
+                 return False
++            # T44.1: 账本无记录但盘上文件大小与云端一致 → 本 item 在「落位后
++            # 写账本前」被中断留下的孤儿，视为本人占用，交由 _download_single
++            # 的 ledger backfill 补账跳过下载（否则会被改道加后缀重下成重复文件）。
++            if (
++                item.file_size > 0
++                and abs_candidate.is_file()
++                and abs_candidate.stat().st_size == item.file_size
++            ):
++                return False
+             # File exists on disk without a matching state record for this unique_id.
+             return True
+         return False
+diff --git a/hwcloudpd/sync.py b/hwcloudpd/sync.py
+index b2e26a0..47adc9f 100755
+--- a/hwcloudpd/sync.py
++++ b/hwcloudpd/sync.py
+@@ -5,6 +5,7 @@ from __future__ import annotations
+ from concurrent.futures import ThreadPoolExecutor, as_completed
+ from datetime import datetime
+ import fnmatch
++import hashlib
+ import logging
+ import os
+ from pathlib import Path
+@@ -37,6 +38,15 @@ if TYPE_CHECKING:  # T25.4：引擎依赖抽象接口（providers 包仅运行
+ logger = logging.getLogger(__name__)
+ 
+ 
++def _sha256_of_file(path: Path) -> str:
++    """流式计算文件 sha256（T44.1 账本补齐用；账本列 NOT NULL 必须给真实值）。"""
++    h = hashlib.sha256()
++    with open(path, "rb") as fh:
++        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
+ def _matches_any_pattern(album: AlbumInfo, patterns: list[str]) -> bool:
+     for pat in patterns:
+         p = pat.strip()
+@@ -298,6 +308,26 @@ class SyncEngine:
+             reserved_paths.add(target_path)
+ 
+         target_path.parent.mkdir(parents=True, exist_ok=True)
++
++        # T44.1 ledger backfill: os.replace 落位与账本写入之间进程被中断时，
++        # 本轮扫描会留下「文件在盘、账本无记录」的孤儿——resolve 会把它当他人
++        # 占用改道重下成重复文件。目标文件已存在且大小与云端一致即信任补账并
++        # 跳过下载；local_sha256 账本列为 NOT NULL，流式读一次文件补齐真实值。
++        if (
++            target_path.is_file()
++            and item.file_size > 0
++            and target_path.stat().st_size == item.file_size
++        ):
++            rel_path = str(target_path.relative_to(self.config.directory))
++            self.store.upsert_downloaded(
++                item,
++                local_rel_path=rel_path,
++                local_sha256=_sha256_of_file(target_path),
++                size_variant=self.config.photo_size,
++            )
++            logger.info("File already on disk, ledger backfilled: %s", target_path)
++            return target_path
++
+         # T32: download temp suffix branded as .aspart (AlbumSync Part).
+         # Legacy .hwpart part-files are auto-migrated here so interrupted
+         # downloads keep their already-downloaded bytes and resume seamlessly.

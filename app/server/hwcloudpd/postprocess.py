@@ -79,6 +79,15 @@ def resolve_target_path(
         if abs_candidate.exists():
             if existing is not None and existing["unique_id"] == item.unique_id:
                 return False
+            # T44.1: 账本无记录但盘上文件大小与云端一致 → 本 item 在「落位后
+            # 写账本前」被中断留下的孤儿，视为本人占用，交由 _download_single
+            # 的 ledger backfill 补账跳过下载（否则会被改道加后缀重下成重复文件）。
+            if (
+                item.file_size > 0
+                and abs_candidate.is_file()
+                and abs_candidate.stat().st_size == item.file_size
+            ):
+                return False
             # File exists on disk without a matching state record for this unique_id.
             return True
         return False

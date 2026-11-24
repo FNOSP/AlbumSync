@@ -990,7 +990,8 @@ class XiaomiProvider:
         def do() -> str:
             client = self._client()
             download_url, meta = client.get_download_meta(photo_id)
-            return json.dumps({"url": download_url, "meta": meta})
+            # T45.1: 携带 photo_id，download_to_part 的重试轮可据此刷新一次性预签 URL
+            return json.dumps({"url": download_url, "meta": meta, "photo_id": photo_id})
 
         return self._auth_retry(do)
 
@@ -1009,12 +1010,22 @@ class XiaomiProvider:
 
         download_url = str(meta_obj.get("url") or "")
         meta = str(meta_obj.get("meta") or "")
+        photo_id = str(meta_obj.get("photo_id") or "")
         if not download_url or not meta:
             raise XiaomiAPIError(0, f"download_url JSON 缺 url/meta: {meta_obj}")
 
         def do() -> Any:
             client = self._client()
-            outcome = client.download_to_file(download_url, meta, part_path, resume=True)
+            refresh_meta: Callable[[], tuple[str, str]] | None = None
+            dl_url, dl_meta = download_url, meta
+            if photo_id:
+                # T45.1: 每轮（含 _auth_retry 重试轮）重新取一次性预签 URL/签名 meta，
+                # 不再复用引擎传入的旧 url——预签凭据过期是 Range 续传 416 误报主因。
+                dl_url, dl_meta = client.get_download_meta(photo_id)
+                refresh_meta = lambda: client.get_download_meta(photo_id)  # noqa: E731
+            outcome = client.download_to_file(
+                dl_url, dl_meta, part_path, resume=True, refresh_meta=refresh_meta,
+            )
             logger.debug("xiaomi download %s: %s", part_path.name, outcome)
             # 对齐引擎 DownloadResult 契约（hwcloudpd.client.DownloadResult，
             # T31.11）：bytes_written 参与大小一致性校验、sha256_hex 记入

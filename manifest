@@ -1,5 +1,5 @@
 appname                    = AlbumSync
-version                    = 0.3.31
+version                    = 0.3.32
 display_name               = 相册同步
 desc                       = """多云相册备份到飞牛 NAS。支持多账号：同一平台可添加多个账号，各自独立管理相册选择、存储目录、调度与登录态，账号间完全隔离、互不干扰，配置保存按账号热生效。华为云空间支持两种登录：浏览器会话 cURL 导入（免密码）与账号密码登录（短信/邮箱二次验证码在网页提交，信任设备后静默重登）。小米云相册（i.mi.com）支持浏览器 cookie 导入（免密码，不支持自动重登）。iCloud 云相册支持 Apple ID/密码登录、双重认证/两步验证及国际区/中国区。同步能力：按相册/文件类型/时间范围过滤、增量下载、目录结构模板、删除镜像策略、并发与限速、cron 定时同步、dry-run 预览、Webhook 通知。账号密码使用机器密钥加密落盘（config 仅存密文），并支持口令加密的凭据备份导出/导入（.asbak，可在全局设置中配置备份目录）。内置 Web 管理界面（账号管理/状态总览/全局设置/单账号工作区）。华为/小米同步引擎基于上游开源项目 hwcloudpd；iCloud 协议复用随包 vendor 的 icloud_photos_downloader 及其纯 Python 依赖，无需 venv/pip 或 NAS 额外安装。开源地址：https://github.com/tuber0613/hwcloudpd"""
 platform                   = x86
@@ -17,6 +17,18 @@ checkport                  = true
 install_dep_apps           = python311
 disable_authorization_path = true
 changelog                  = """
+- 0.3.32 同步轮次可观测性 + 账本孤儿补齐 + 小米 416 断点保护（T43/T44/T45）：
+  ① 轮次开始日志 Sync started (mode=startup/immediate/scheduled, scan=full/incremental)
+  与引擎分页扫描每 5 页进度日志（scan progress，三平台统一覆盖，patches/0009）——
+  长扫描阶段不再静默（2139 张约 10 分钟零输出曾致「立即同步失效」误判）；
+  ② 账本-文件一致性补齐（patches/0010）：落位与写账本之间进程中断留下的孤儿文件
+  （在盘无账本）下轮会以 <名字>-<字节数> 后缀改道重下成重复文件（T28.8b 真机
+  234MB 重下案发的深层机制）——现路径解析判定孤儿（大小与云端一致）视为本人
+  占用，下载循环秒级补账跳过下载（ledger backfilled 日志）；大小不符仍走改道重下；
+  ③ 小米下载 416 两段式：get_download_url 携带 photo_id，download_to_part 每轮
+  （含 401 重试轮）刷新一次性预签 URL；Range 续传遇 416 先刷新 URL 重试一次、
+  仍 416 才删 part 全量重下，预签过期不再误杀断点；新增 11 项单测（轮次/进度
+  日志 4 项、账本补齐 2 项、416 两段式与 URL 刷新 5 项），全量 283 绿
 - 0.3.31 Web 界面样式修复 + 数据库统计修复：补 .banner.ok 成功态类（8 处 JS 内联样式收编）；小米
   长效票据/密码登录卡内联两列网格改为响应式类（640px 以下折叠单列）；卡片标题
   flex-wrap 防窄屏溢出；移动端输入框 16px 防 iOS 聚焦放大；键盘焦点可见

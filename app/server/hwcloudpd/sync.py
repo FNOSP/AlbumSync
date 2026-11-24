@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import fnmatch
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -35,6 +36,15 @@ if TYPE_CHECKING:  # T25.4：引擎依赖抽象接口（providers 包仅运行�
     from providers.base import PhotoProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _sha256_of_file(path: Path) -> str:
+    """流式计算文件 sha256（T44.1 账本补齐用；账本列 NOT NULL 必须给真实值）。"""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _matches_any_pattern(album: AlbumInfo, patterns: list[str]) -> bool:
@@ -189,6 +199,7 @@ class SyncEngine:
         pending: list[MediaStub] = []
         consecutive_found = 0
 
+        page_no = 0
         for page in self.client.iter_simple_files(
             album_id,
             album_name=album_name,
@@ -198,6 +209,15 @@ class SyncEngine:
             page_size=self.config.page_size,
             request_delay_ms=self.config.request_delay_ms,
         ):
+            page_no += 1
+            if page_no == 1 or page_no % 5 == 0:
+                logger.info(
+                    "scan progress: album=%s page=%d scanned=%d pending=%d",
+                    album_name or "timeline",
+                    page_no,
+                    report.scanned,
+                    len(pending),
+                )
             stop_source = False
             for raw_stub in page:
                 if raw_stub.album_id in excluded_ids:
@@ -288,6 +308,26 @@ class SyncEngine:
             reserved_paths.add(target_path)
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # T44.1 ledger backfill: os.replace 落位与账本写入之间进程被中断时，
+        # 本轮扫描会留下「文件在盘、账本无记录」的孤儿——resolve 会把它当他人
+        # 占用改道重下成重复文件。目标文件已存在且大小与云端一致即信任补账并
+        # 跳过下载；local_sha256 账本列为 NOT NULL，流式读一次文件补齐真实值。
+        if (
+            target_path.is_file()
+            and item.file_size > 0
+            and target_path.stat().st_size == item.file_size
+        ):
+            rel_path = str(target_path.relative_to(self.config.directory))
+            self.store.upsert_downloaded(
+                item,
+                local_rel_path=rel_path,
+                local_sha256=_sha256_of_file(target_path),
+                size_variant=self.config.photo_size,
+            )
+            logger.info("File already on disk, ledger backfilled: %s", target_path)
+            return target_path
+
         # T32: download temp suffix branded as .aspart (AlbumSync Part).
         # Legacy .hwpart part-files are auto-migrated here so interrupted
         # downloads keep their already-downloaded bytes and resume seamlessly.

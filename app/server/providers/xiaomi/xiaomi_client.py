@@ -656,12 +656,15 @@ class XiaomiClient:
         *,
         resume: bool = True,
         chunk_size: int = 65536,
+        refresh_meta: Callable[[], tuple[str, str]] | None = None,
     ) -> str:
         """执行 ③：POST download_file 流式写盘，支持 .part 断点续传（T28.4）。
 
         对齐 icloudpd .part 语义：path 已有部分内容时带 Range: bytes=N- 请求；
         206 追加续传；200（服务端忽略 Range 返回全量）覆盖重写；416（Range
-        起点越界）删除已有 part 后全量重下。校验与原子落位由调用方负责
+        起点越界）两段式处理（T45.2）：部分网关把预签 URL 失效也统一映射为
+        416，故先经 refresh_meta 刷新 URL 重试一次 Range 续传，仍 416 才认定
+        part 真越界，删 part 全量重下。校验与原子落位由调用方负责
         （引擎 sync 层做 sha1 校验后 rename）。
 
         返回落位方式："resumed"（206 续传）/ "full"（200 全量覆盖）/
@@ -676,7 +679,21 @@ class XiaomiClient:
                 return self._download_post(download_url, meta, path, range_start=existing,
                                            chunk_size=chunk_size)
             except _XiaomiRangeNotSatisfiable:
-                logger.info("xiaomi download range unsatisfiable, restart full: %s", path.name)
+                if refresh_meta is not None:
+                    try:
+                        dl2, meta2 = refresh_meta()
+                        return self._download_post(dl2, meta2, path, range_start=existing,
+                                                   chunk_size=chunk_size)
+                    except _XiaomiRangeNotSatisfiable:
+                        logger.info(
+                            "xiaomi download range unsatisfiable after url refresh,"
+                            " restart full: %s",
+                            path.name,
+                        )
+                else:
+                    logger.info(
+                        "xiaomi download range unsatisfiable, restart full: %s", path.name
+                    )
                 path.unlink(missing_ok=True)
         return self._download_post(download_url, meta, path, range_start=None,
                                    chunk_size=chunk_size)
