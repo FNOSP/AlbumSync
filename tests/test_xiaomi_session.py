@@ -270,7 +270,7 @@ class TestDaemonStopAbortNoise(unittest.TestCase):
         return daemon
 
     def _closed_db_engine(self):
-        def run_once(force_full_scan=False):
+        def run_once(force_full_scan=False, progress_cb=None):
             raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
         return type("StubEngine", (), {"run_once": staticmethod(run_once)})()
 

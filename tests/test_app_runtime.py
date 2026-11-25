@@ -621,7 +621,7 @@ class TestHotReloadIsolation(ManagerTest):
 class TestSerialGate(unittest.TestCase):
     def _fake_engine(self, log: list, running: list, lock: threading.Lock):
         class FakeEngine:
-            def run_once(self, force_full_scan: bool = False):
+            def run_once(self, force_full_scan: bool = False, progress_cb=None):
                 with lock:
                     running.append(1)
                     log.append(("enter", len(running)))
@@ -660,7 +660,7 @@ class TestSerialGate(unittest.TestCase):
         engine_started = threading.Event()
 
         class NeverEngine:
-            def run_once(self, force_full_scan: bool = False):
+            def run_once(self, force_full_scan: bool = False, progress_cb=None):
                 engine_started.set()
                 return "ran"
 

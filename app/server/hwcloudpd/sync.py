@@ -491,13 +491,34 @@ class SyncEngine:
         report.deleted_cloud += deleted
         logger.info("Moved %d backed-up items to cloud Recycle Bin", deleted)
 
-    def run_once(self, *, force_full_scan: bool = False) -> SyncReport:
+    @staticmethod
+    def _emit_progress(progress_cb: Callable[[dict], None] | None, **fields) -> None:
+        """T46.1: 同步进度快照上报（绝对量语义，daemon 侧锁内合并）。
+
+        进度是纯观测面：回调全程 try/except 隔离，任何回调异常都不得影响
+        同步主流程（降级为 debug 日志）；未传回调时零开销直接返回。
+        """
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(fields)
+        except Exception:
+            logger.debug("progress callback error", exc_info=True)
+
+    def run_once(
+        self,
+        *,
+        force_full_scan: bool = False,
+        progress_cb: Callable[[dict], None] | None = None,
+    ) -> SyncReport:
         """Execute a complete synchronization pass and return a SyncReport."""
         started = time.monotonic()
         report = SyncReport()
         is_dry = self.config.dry_run or self.config.only_print_filenames
         effective_until_found = None if force_full_scan else self.config.until_found
 
+        # T46.1: 扫描阶段（列相册/收集待下载/元数据补全）总量未知，仅上报阶段。
+        self._emit_progress(progress_cb, phase="scanning")
         self.config.directory.mkdir(parents=True, exist_ok=True)
         all_albums = self.client.list_albums(include_stats=False)
         target_albums, excluded_ids, name_by_id = self._select_albums(all_albums)
@@ -557,6 +578,13 @@ class SyncEngine:
                 items_to_download.append(item)
 
         downloaded_items: list[MediaItem] = []
+        download_total = len(items_to_download)
+        if items_to_download and not is_dry:
+            # T46.1: 下载起点（总量已知）；dry-run 分支不回调（纯预览无进度语义）。
+            self._emit_progress(
+                progress_cb, phase="downloading",
+                total=download_total, done=0, failed=0,
+            )
         if items_to_download:
             if is_dry:
                 dry_reserved: set[Path] = set()
@@ -603,11 +631,21 @@ class SyncEngine:
                             )
                             downloaded_items.append(item)
                             report.downloaded += 1
+                            self._emit_progress(
+                                progress_cb, phase="downloading", total=download_total,
+                                done=report.downloaded, failed=report.failed,
+                                current_file=item.file_name,
+                            )
                             logger.info("Downloaded %s", target)
                         except AuthExpiredError:
                             raise
                         except Exception as exc:
                             report.failed += 1
+                            self._emit_progress(
+                                progress_cb, phase="downloading", total=download_total,
+                                done=report.downloaded, failed=report.failed,
+                                current_file=item.file_name,
+                            )
                             logger.error("Failed to download %s (%s): %s", item.file_name, item.unique_id, exc)
                 else:
                     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -626,11 +664,21 @@ class SyncEngine:
                                 target = fut.result()
                                 downloaded_items.append(item)
                                 report.downloaded += 1
+                                self._emit_progress(
+                                    progress_cb, phase="downloading", total=download_total,
+                                    done=report.downloaded, failed=report.failed,
+                                    current_file=item.file_name,
+                                )
                                 logger.info("Downloaded %s", target)
                             except AuthExpiredError:
                                 raise
                             except Exception as exc:
                                 report.failed += 1
+                                self._emit_progress(
+                                    progress_cb, phase="downloading", total=download_total,
+                                    done=report.downloaded, failed=report.failed,
+                                    current_file=item.file_name,
+                                )
                                 logger.error(
                                     "Failed to download %s (%s): %s",
                                     item.file_name,
@@ -645,4 +693,8 @@ class SyncEngine:
             self._run_cloud_cleanup(downloaded_items, report)
 
         report.duration_sec = time.monotonic() - started
+        # T46.1: 收尾终态（最终计数随快照带出；异常路径由 daemon 置 error）。
+        self._emit_progress(
+            progress_cb, phase="done", done=report.downloaded, failed=report.failed
+        )
         return report

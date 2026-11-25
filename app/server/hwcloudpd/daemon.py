@@ -11,6 +11,7 @@ from pathlib import Path
 import random
 import signal
 import sqlite3
+import threading
 import time
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -81,6 +82,12 @@ class SyncDaemon:
         self._last_error: str = ""
         self._last_report: SyncReport | None = None
 
+        # T46.2: 同步进度快照（纯内存瞬态，不落盘）——引擎 progress_cb 的落点。
+        # 状态机: waiting(闸门排队) → scanning → downloading → done/error；
+        # 重启后自然清零，符合「本次同步」语义；health.json 语义不变。
+        self._progress: dict[str, Any] = {}
+        self._progress_lock = threading.Lock()
+
         self._cron_schedule = (
             CronSchedule.parse(config.cron) if config.cron and config.cron.strip() else None
         )
@@ -116,6 +123,50 @@ class SyncDaemon:
         tmp = self.health_file.with_name(f".health.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp, self.health_file)
+
+    # ---------- 同步进度快照（T46.2） ----------
+
+    def _on_engine_progress(self, fields: dict[str, Any]) -> None:
+        """引擎进度回调落点（多并发下载线程会并发调用，锁内合并绝对量快照）。"""
+        with self._progress_lock:
+            prev_phase = self._progress.get("phase")
+            self._progress.update(fields)
+            if fields.get("phase") == "downloading" and prev_phase != "downloading":
+                self._progress["download_started_at"] = time.time()
+
+    def progress_snapshot(self) -> dict[str, Any] | None:
+        """读取一致进度快照（供 REST 层轮询）；从未同步/空闲返回 None。
+
+        eta_sec/speed_per_min 为读时派生字段：按已完成项均速线性外推
+        （照片/视频混合场景按项数估算，字节加权口径留待二期）。
+        """
+        with self._progress_lock:
+            snap = dict(self._progress)
+        phase = snap.get("phase")
+        if not phase:
+            return None
+        total = int(snap.get("total") or 0)
+        done = int(snap.get("done") or 0)
+        t0 = snap.get("download_started_at")
+        if phase == "downloading" and total > 0 and done > 0 and t0:
+            elapsed = max(time.time() - float(t0), 1e-6)
+            snap["eta_sec"] = round(elapsed / done * (total - done), 1)
+            snap["speed_per_min"] = round(done / elapsed * 60.0, 1)
+        return snap
+
+    def _set_progress_error(self, message: str) -> None:
+        """异常终态（登录态失效/同步异常/中止），供前端收尾展示。"""
+        with self._progress_lock:
+            self._progress["phase"] = "error"
+            self._progress["error"] = message
+            self._progress["finished_at"] = time.time()
+
+    def _reset_progress_waiting(self, started_ts: float) -> None:
+        """轮次起点：整体重置快照（清掉上一轮 total/done/current_file 残留）。"""
+        with self._progress_lock:
+            self._progress.clear()
+            self._progress["phase"] = "waiting"
+            self._progress["started_at"] = started_ts
 
     async def _sleep_or_stop(self, seconds: float) -> bool:
         """Sleep up to `seconds`; return True if stopped early."""
@@ -284,15 +335,26 @@ class SyncDaemon:
                 "full" if force_full else "incremental",
             )
 
+            # T46.2: 先置排队态再进引擎——全局串行闸门的等待期对前端可见
+            # （排队中），快照整体重置避免上一轮 total/done/current_file 残留。
+            self._reset_progress_waiting(now_ts)
+
             try:
                 engine = self._engine_factory()
-                report = await asyncio.to_thread(engine.run_once, force_full_scan=force_full)
+                report = await asyncio.to_thread(
+                    engine.run_once,
+                    force_full_scan=force_full,
+                    progress_cb=self._on_engine_progress,
+                )
                 self._last_sync_at = time.time()
                 if force_full:
                     self._last_full_scan_at = self._last_sync_at
                 self._last_report = report
                 self._last_error = ""
                 self.write_health()
+                # T46.2: 终态收尾时间戳（done 快照由引擎回调携带最终计数）。
+                with self._progress_lock:
+                    self._progress["finished_at"] = time.time()
                 logger.info(
                     "Sync completed (%s): %s",
                     "full" if force_full else "incremental",
@@ -300,6 +362,7 @@ class SyncDaemon:
                 )
                 return report
             except AuthExpiredError as exc:
+                self._set_progress_error(str(exc))
                 await self._handle_auth_expired(str(exc))
                 return None
             except sqlite3.ProgrammingError as exc:
@@ -307,9 +370,11 @@ class SyncDaemon:
                 # 5s 后不再等待同步周期跑完，0.1.7）——WAL 原子提交数据无损，
                 # 属预期中止：降噪为 INFO，不写健康、不通知、不留裸 traceback（T31.9）
                 logger.info("Sync aborted after account stop: %s", exc)
+                self._set_progress_error("已中止（账号停止或重载）")
                 return None
             except Exception as exc:
                 self._last_error = str(exc)
+                self._set_progress_error(str(exc))
                 self.write_health()
                 logger.exception("Sync run failed: %s", exc)
                 self.notifier.notify(

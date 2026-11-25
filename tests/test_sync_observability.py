@@ -114,7 +114,7 @@ class ScanProgressLogTest(unittest.TestCase):
 
 
 class _OkEngine:
-    def run_once(self, force_full_scan: bool = False) -> SyncReport:
+    def run_once(self, force_full_scan: bool = False, progress_cb=None) -> SyncReport:
         return SyncReport(downloaded=1)
 
 

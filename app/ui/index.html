@@ -177,6 +177,27 @@ pre.logs{background:#141822;color:#d6e2f0;border-radius:8px;padding:12px;font-si
 .wiz-step{flex:1;text-align:center;font-size:12px;color:var(--muted);padding:6px 0;border-bottom:2px solid var(--border)}
 .wiz-step.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
 .wiz-step.done{color:var(--green);border-bottom-color:var(--green)}
+/* ---------- 同步进度条（T46）：状态驱动显隐，活跃淡入、终态满格淡出 ---------- */
+.badge.info{background:#e8f0fd;color:var(--accent);border-color:#c6d9f5}
+.badge.off{background:#f1f3f6;color:#8a8f99;border-color:#dde1e8}
+.sp-slot{margin-top:8px}
+.syncprog{border:1px solid var(--border);border-radius:8px;padding:9px 11px;background:#f7f9fc;
+  opacity:0;transition:opacity .5s ease}
+.syncprog.show{opacity:1}
+.syncprog.anim-in{animation:spfadein .35s ease}
+@keyframes spfadein{from{opacity:0}to{opacity:1}}
+.sp-track{height:6px;border-radius:4px;background:#e3e8f2;overflow:hidden}
+.sp-fill{height:100%;border-radius:4px;background:linear-gradient(90deg,#3d8bfd,#1a9b57);
+  transition:width .4s ease}
+.sp-fill.sp-indet{width:100%;background:linear-gradient(90deg,#cdd7ea 25%,var(--accent) 50%,#cdd7ea 75%);
+  background-size:200% 100%;animation:spflow 1.1s linear infinite}
+@keyframes spflow{from{background-position:200% 0}to{background-position:0 0}}
+.sp-fill.sp-full{background:var(--green)}
+.sp-fill.sp-bad{background:var(--red)}
+.sp-text{display:flex;align-items:center;gap:8px;margin-top:6px;font-size:12px;color:var(--muted)}
+.sp-pct{font-weight:600;color:var(--accent)}
+.sp-cur{margin-top:3px;font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
 </style>
 </head>
 <body>
@@ -300,6 +321,7 @@ pre.logs{background:#141822;color:#d6e2f0;border-radius:8px;padding:12px;font-si
     </div>
     <div class="card">
       <h2>最近一次同步报告 <span class="hint" id="sync-time-hint"></span></h2>
+      <div id="sync-progress" class="sp-slot"></div><!-- T46: 本次同步实时进度（状态驱动显隐） -->
       <div id="report-grid" class="stat-grid"><div class="empty" style="grid-column:1/-1">暂无同步记录</div></div>
     </div>
     <div class="card">
@@ -584,8 +606,8 @@ function switchTab(name) {
   }
   Object.values(timers).forEach(clearInterval);
   for (const k of Object.keys(timers)) delete timers[k];
-  if (name === "status") { refreshStatus(); timers.status = setInterval(refreshStatus, 15000); }
-  if (name === "accounts") loadAccounts();
+  if (name === "status") { refreshStatus(); timers.status = setInterval(statusPollTick, 2000); }
+  if (name === "accounts") { loadAccounts(); timers.accounts = setInterval(acctPollTick, 2000); }
   if (name === "overview") refreshOverview();
   if (name === "global") { loadGlobal(); loadBackupPanel(); }
   if (name === "settings") loadConfig();
@@ -611,6 +633,7 @@ function fmtTs(ts) {
 async function refreshStatus() {
   const id = curId();
   if (!id) return;
+  _lastStatusPoll = Date.now();
   let s;
   try { s = (await api(`accounts/${id}/status`)).status; } catch (e) {
     $("auth-summary").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return;
@@ -660,6 +683,10 @@ async function refreshStatus() {
   $("store-grid").innerHTML = keys.length
     ? keys.map(([k, lbl]) => `<div class="stat"><div class="num">${sc[k]}</div><div class="lbl">${lbl}</div></div>`).join("")
     : `<div class="empty" style="grid-column:1/-1">暂无记录</div>`;
+
+  // T46: 本次同步实时进度（状态驱动显隐；活跃时 statusPollTick 自动 2s 轮询）
+  _statusProgressActive = progPhaseActive(s.progress);
+  paintProgress($("sync-progress"), { id: s.id, progress: s.progress });
 }
 
 async function triggerSync() {
@@ -1429,8 +1456,108 @@ async function loadLogs() {
   } catch (e) { $("log-view").textContent = "加载失败：" + e.message; }
 }
 
+/* ---------- 同步进度条（T46）：状态驱动显隐，活跃淡入、终态满格淡出 ---------- */
+const _progAnim = new Map();  // `${id}|${started_at}` -> true，淡入动画每轮只播一次
+const _progEnd = new Map();   // id -> { key, stage: visible|fading|gone }，终态收尾状态机
+let _lastAcctPoll = 0;        // 账号页自适应轮询：活跃 2s / 空闲 15s
+let _lastStatusPoll = 0;      // 详情页同理（平时 15s，进度活跃加密 2s）
+let _statusProgressActive = false;
+
+function progPhaseActive(p) {
+  return !!p && ["waiting", "scanning", "downloading"].includes(p.phase);
+}
+function progPhaseEnding(p) {
+  return !!p && (p.phase === "done" || p.phase === "error");
+}
+
+function fmtEta(sec) {
+  if (sec == null || !isFinite(sec) || sec < 0) return "";
+  const s = Math.max(1, Math.round(sec));
+  if (s < 60) return s + " 秒";
+  const m = Math.round(s / 60);
+  if (m < 60) return m + " 分钟";
+  return Math.floor(m / 60) + " 小时 " + (m % 60) + " 分";
+}
+
+function progBarHtml(p) {
+  const track = inner => `<div class="sp-track">${inner}</div>`;
+  if (p.phase === "waiting")
+    return { bar: track('<div class="sp-fill sp-indet"></div>'), text: '<span class="spin"></span>排队等待同步…' };
+  if (p.phase === "scanning")
+    return { bar: track('<div class="sp-fill sp-indet"></div>'), text: '<span class="spin"></span>正在扫描云盘相册…' };
+  const total = p.total || 0, done = Math.min(p.done || 0, total);
+  const pct = total > 0 ? Math.round(done * 100 / total) : 0;
+  const eta = p.eta_sec != null ? ` · 预计剩余 ${fmtEta(p.eta_sec)}` : "";
+  const speed = p.speed_per_min != null ? ` · ${p.speed_per_min} 项/分` : "";
+  return {
+    bar: track(`<div class="sp-fill" style="width:${pct}%"></div>`),
+    text: `下载中 <span class="sp-pct">${pct}%</span>&nbsp;${done}/${total}${eta}${speed}`
+  };
+}
+
+function progEndHtml(p) {
+  const bad = p.phase === "error";
+  return `<div class="sp-track"><div class="sp-fill ${bad ? "sp-bad" : "sp-full"}" style="width:100%"></div></div>` +
+    (bad ? `<div class="sp-text">同步异常终止</div>` : "");
+}
+
+function paintProgress(slot, a) {
+  const p = a.progress, id = a.id;
+  if (progPhaseActive(p)) {
+    _progEnd.delete(id);
+    const runKey = `${id}|${p.started_at || ""}`;
+    const first = !_progAnim.has(runKey);
+    _progAnim.set(runKey, true);
+    const { bar, text } = progBarHtml(p);
+    const cur = p.current_file ? `<div class="sp-cur" title="${esc(p.current_file)}">${esc(p.current_file)}</div>` : "";
+    slot.innerHTML = `<div class="syncprog${first ? " anim-in" : ""} show">${bar}<div class="sp-text">${text}</div>${cur}</div>`;
+    return;
+  }
+  if (progPhaseEnding(p)) {
+    const key = `${id}|${p.phase}|${p.finished_at || ""}`;
+    const end = _progEnd.get(id);
+    if (!end || end.key !== key) {
+      // 终态首见：满格展示 ~1.8s → 淡出 .5s → 下一轮轮询后彻底移除（无文字统计）
+      const st = { key, stage: "visible" };
+      _progEnd.set(id, st);
+      slot.innerHTML = `<div class="syncprog show">${progEndHtml(p)}</div>`;
+      setTimeout(() => {
+        if (_progEnd.get(id) !== st) return;
+        st.stage = "fading";
+        const node = slot.firstElementChild;
+        if (node) node.classList.remove("show");
+        setTimeout(() => { if (_progEnd.get(id) === st) st.stage = "gone"; }, 600);
+      }, 1800);
+    } else if (end.stage === "gone") {
+      slot.innerHTML = "";
+    }
+    // stage visible/fading：不动 DOM，让淡出过渡播完
+    return;
+  }
+  // 空闲：清槽并修剪该账号的轮次动画记录
+  _progEnd.delete(id);
+  for (const k of [..._progAnim.keys()]) if (k.startsWith(id + "|")) _progAnim.delete(k);
+  slot.innerHTML = "";
+}
+
+function acctPollTick() {
+  // 活跃同步 / 终态收尾期 → 2s 高频；空闲降为 ~15s 一次
+  const active = (window._accountsCacheAll || []).some(a => progPhaseActive(a.progress)) ||
+    [..._progEnd.values()].some(e => e.stage !== "gone");
+  if (!active && Date.now() - _lastAcctPoll < 15000) return;
+  loadAccounts();
+}
+
+function statusPollTick() {
+  const end = _progEnd.get(curId()) || {};
+  const active = _statusProgressActive || end.stage === "visible" || end.stage === "fading";
+  if (!active && Date.now() - _lastStatusPoll < 15000) return;
+  refreshStatus();
+}
+
 /* ---------- 账号管理 ---------- */
 function acctStatusBadge(a) {
+  if (progPhaseActive(a.progress)) return '<span class="badge info">同步中</span>';
   if (!a.enabled) return '<span class="badge off">已停用</span>';
   if (a.ok === true && a.auth_valid !== false) return '<span class="badge ok">正常</span>';
   if (a.ok === true) return '<span class="badge warn">登录失效</span>';
@@ -1438,12 +1565,14 @@ function acctStatusBadge(a) {
 }
 
 async function loadAccounts() {
+  _lastAcctPoll = Date.now();
   try {
     const d = await api("accounts");
     window._accountsCacheAll = d.accounts || [];  // 共享目录检测用（T29.6）
     renderAccountList(d.accounts || []);
     updateAggregateBadge(d.accounts || []);
   } catch (e) {
+    _acctStructCache = "";
     $("account-list").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`;
   }
 }
@@ -1461,16 +1590,13 @@ function acctOpenArgs(a) {
   return esc(JSON.stringify({ id: a.id, name: a.name })).replace(/'/g, "&#39;");
 }
 
-function renderAccountList(items) {
-  const box = $("account-list");
-  if (!items.length) {
-    box.innerHTML = `<div class="empty">还没有账号。点击右上角「新建账号」添加第一个云盘账号（支持 ${esc(PlatformUI.labelsText())}）。</div>`;
-    return;
-  }
-  box.innerHTML = items.map(a => {
-    const sub = [a.username, a.last_sync_at ? `最近同步 ${fmtTs(a.last_sync_at)}` : "从未同步"]
-      .filter(Boolean).join(" · ");
-    return `<div class="acct-card ${a.enabled ? "" : "disabled"}">
+let _acctStructCache = "";  // T46: 结构性 HTML（不含进度槽）未变化时不整体重建，
+                            // 避免轮询重渲染打断进度条动画/按钮悬停与文本选区
+
+function acctStructuralHtml(a) {
+  const sub = [a.username, a.last_sync_at ? `最近同步 ${fmtTs(a.last_sync_at)}` : "从未同步"]
+    .filter(Boolean).join(" · ");
+  return `<div class="acct-card ${a.enabled ? "" : "disabled"}">
       <div class="acct-main">
         <div class="acct-title">${esc(a.name)}
           <span class="plat-chip">☁ ${esc(PlatformUI.label(a.platform))}</span>
@@ -1479,6 +1605,7 @@ function renderAccountList(items) {
         </div>
         <div class="acct-sub">${esc(sub)}</div>
         ${a.last_error ? `<div class="acct-sub" style="color:var(--red,#c0392b)">${esc(a.last_error)}</div>` : ""}
+        <div class="sp-slot" data-sp="${esc(a.id)}"></div>
       </div>
       <div class="acct-actions">
         <button class="btn primary" onclick='openAccount(${acctOpenArgs(a)})'>进入管理</button>
@@ -1488,7 +1615,25 @@ function renderAccountList(items) {
         </div>
       </div>
     </div>`;
-  }).join("");
+}
+
+function renderAccountList(items) {
+  const box = $("account-list");
+  if (!items.length) {
+    _acctStructCache = "";
+    box.innerHTML = `<div class="empty">还没有账号。点击右上角「新建账号」添加第一个云盘账号（支持 ${esc(PlatformUI.labelsText())}）。</div>`;
+    return;
+  }
+  const struct = items.map(acctStructuralHtml).join("");
+  if (struct !== _acctStructCache) {
+    _acctStructCache = struct;
+    box.innerHTML = struct;
+  }
+  // 进度槽独立刷新（T46）：结构未变时不重建卡片，进度条淡入淡出不受轮询打断
+  for (const a of items) {
+    const slot = box.querySelector(`.sp-slot[data-sp="${CSS.escape(a.id)}"]`);
+    if (slot) paintProgress(slot, a);
+  }
 }
 
 async function toggleAccount(id, enabled) {

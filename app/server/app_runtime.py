@@ -701,13 +701,16 @@ class _SerialSyncGate:
         self.cancelled = cancelled
         self.poll_sec = poll_sec
 
-    def run_once(self, inner: SyncEngine, *, force_full_scan: bool = False) -> SyncReport:
+    def run_once(self, inner: SyncEngine, *, force_full_scan: bool = False,
+                 progress_cb=None) -> SyncReport:
         while not self.cancelled.is_set():
             if self.gate.acquire(timeout=self.poll_sec):
                 try:
                     if self.cancelled.is_set():
                         return SyncReport()  # 已取消：不执行
-                    return inner.run_once(force_full_scan=force_full_scan)
+                    return inner.run_once(
+                        force_full_scan=force_full_scan, progress_cb=progress_cb
+                    )
                 finally:
                     self.gate.release()
         return SyncReport()
@@ -843,11 +846,15 @@ class AccountRuntime:
         runtime = self
 
         class _GatedDaemonEngine:
-            def run_once(self, force_full_scan: bool = False) -> SyncReport:
+            def run_once(self, force_full_scan: bool = False, progress_cb=None) -> SyncReport:
                 gate = _SerialSyncGate(
                     runtime.sync_gate or threading.Lock(), runtime._engine_cancelled
                 )
-                return gate.run_once(runtime._make_engine(), force_full_scan=force_full_scan)
+                return gate.run_once(
+                    runtime._make_engine(),
+                    force_full_scan=force_full_scan,
+                    progress_cb=progress_cb,
+                )
 
         return _GatedDaemonEngine
 
@@ -920,6 +927,17 @@ class AccountRuntime:
         except Exception:
             return {}
 
+    def _daemon_progress(self) -> dict[str, Any] | None:
+        """T46.3: daemon 进度快照（waiting/scanning/downloading/done/error），空闲 None。"""
+        daemon = self._daemon
+        if daemon is None:
+            return None
+        try:
+            return daemon.progress_snapshot()
+        except Exception as exc:
+            logger.warning("progress_snapshot failed: %s", exc)
+            return None
+
     def summary(self) -> dict[str, Any]:
         """账号摘要（聚合列表用，轻量）。"""
         health = self._read_health()
@@ -935,6 +953,7 @@ class AccountRuntime:
             "daemon_running": bool(thread and thread.is_alive()),
             "last_sync_at": health.get("last_sync_at"),
             "last_error": health.get("last_error") or "",
+            "progress": self._daemon_progress(),
         }
 
     def status_snapshot(self) -> dict[str, Any]:
@@ -964,6 +983,7 @@ class AccountRuntime:
             "store_counts": store_counts,
             "updated_at": health.get("updated_at"),
             "auth": self.auth_status(),
+            "progress": self._daemon_progress(),
         }
 
     def auth_status(self) -> dict[str, Any]:
