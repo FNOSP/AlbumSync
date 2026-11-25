@@ -361,6 +361,17 @@ class TestManagerBasics(ManagerTest):
         self.assertEqual(snap["accounts"], [])
         self.assertTrue(self.mgr.service_health()["daemon_running"])
 
+    def test_auth_status_platform_probe_passthrough(self):
+        """平台扩展探针字段（小米 pwd_configured/longterm）经 auth_status 透传。"""
+        acc = self._create(name="小米号", platform="xiaomi", username="13800000000")
+        info = self.mgr.account_auth_status(acc["id"])
+        self.assertIn("pwd_configured", info)
+        self.assertTrue(info["pwd_configured"])
+        self.assertIn("longterm", info)
+        # 通用字段不受透传影响
+        self.assertFalse(info["has_cas_tgt"])
+        self.assertIn("has_session", info)
+
     def test_create_and_list(self):
         acc = self._create()
         self.assertRegex(acc["id"], r"^acc-huawei-[0-9a-f]{6}$")

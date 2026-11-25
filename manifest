@@ -1,5 +1,5 @@
 appname                    = AlbumSync
-version                    = 0.3.32
+version                    = 0.3.34
 display_name               = 相册同步
 desc                       = """多云相册备份到飞牛 NAS。支持多账号：同一平台可添加多个账号，各自独立管理相册选择、存储目录、调度与登录态，账号间完全隔离、互不干扰，配置保存按账号热生效。华为云空间支持两种登录：浏览器会话 cURL 导入（免密码）与账号密码登录（短信/邮箱二次验证码在网页提交，信任设备后静默重登）。小米云相册（i.mi.com）支持浏览器 cookie 导入（免密码，不支持自动重登）。iCloud 云相册支持 Apple ID/密码登录、双重认证/两步验证及国际区/中国区。同步能力：按相册/文件类型/时间范围过滤、增量下载、目录结构模板、删除镜像策略、并发与限速、cron 定时同步、dry-run 预览、Webhook 通知。账号密码使用机器密钥加密落盘（config 仅存密文），并支持口令加密的凭据备份导出/导入（.asbak，可在全局设置中配置备份目录）。内置 Web 管理界面（账号管理/状态总览/全局设置/单账号工作区）。华为/小米同步引擎基于上游开源项目 hwcloudpd；iCloud 协议复用随包 vendor 的 icloud_photos_downloader 及其纯 Python 依赖，无需 venv/pip 或 NAS 额外安装。开源地址：https://github.com/tuber0613/hwcloudpd"""
 platform                   = x86
@@ -15,8 +15,24 @@ desktop_applaunchname      = AlbumSync.Application
 service_port               = 9801
 checkport                  = true
 install_dep_apps           = python311
-disable_authorization_path = true
+disable_authorization_path = false
 changelog                  = """
+- 0.3.34 小米账号密码登录凭据归位（交互统一）：账号/密码输入从「认证与安全」页移回
+  「同步设置」账号与认证卡片（与华为/iCloud 同模式）——密码经保存配置走信封加密落盘
+  （config v3 语义，不再单独维护「记住密码」密文），认证页密码卡精简为「使用已保存
+  账号登录」按钮 + 图形验证码/短信邮箱二次验证面板，请求体不再携带凭据；后端凭据
+  改读账号配置（password_login_start 优先 config，缺密码时对 0.3.30/0.3.31 旧版
+  「记住密码」密文做一次性解密迁移，成功后清除并提示到同步设置重新保存）；
+  auth_probe 透传 pwd_configured（未配置密码时登录按钮置灰+指引）；认证状态行新增
+  「已保存账号密码」；小米 credentials_hint 指向「同步设置」；新建向导补账号/密码
+  可选字段；策略层 4 项单测重写（配置凭据直登/缺凭据提示/旧密文迁移/失败冷却）
+- 0.3.33 修复「应用设置 → 访问权限」目录授权入口消失（自 0.2.5 起）：0.2.5 做多 NAS
+  用户隔离时误将 manifest 的 disable_authorization_path 置 true（当时误以为是任意
+  fnOS 用户可打开应用的控制点），fnOS 据此判定应用不使用路径授权机制，直接隐藏了
+  商店应用设置里的目录授权区块，用户自 0.2.5 起无处给应用授权目录；T30.6 spike 已
+  实锤多用户入口的真实控制点是 app/ui/config 的 allUsers（本轮未改动、保持 true），
+  该 manifest 开关纯属误改——现改回 false，「系统设置 → 应用 → 相册同步 → 应用
+  设置 → 访问权限」恢复显示，授权后应用内目录探测实时生效（无需重启）
 - 0.3.32 同步轮次可观测性 + 账本孤儿补齐 + 小米 416 断点保护（T43/T44/T45）：
   ① 轮次开始日志 Sync started (mode=startup/immediate/scheduled, scan=full/incremental)
   与引擎分页扫描每 5 页进度日志（scan progress，三平台统一覆盖，patches/0009）——

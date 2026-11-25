@@ -153,6 +153,14 @@ class TestBaseAuthStrategyContract(unittest.TestCase):
         self.assertIsNone(probe["pending_2fa"])
         self.assertFalse(probe["has_cas_tgt"])
         self.assertFalse(probe["credentials_configured"])
+        # 平台扩展探针字段（auth_status 泛化透传到前端）
+        self.assertIn("pwd_configured", probe)
+        self.assertFalse(probe["pwd_configured"])
+        self.assertIn("longterm", probe)
+        with_pwd = XiaomiAuthStrategy(
+            am, {"id": "acc-xiaomi-t1", "username": "u", "password": "p"})
+        self.assertTrue(with_pwd.auth_probe()["pwd_configured"])
+        self.assertTrue(with_pwd.has_credentials())
         # 不支持自动重登 → build_authenticator 返回 NoAutoRelogin 桩
         auth = strat.build_authenticator()
         self.assertIsInstance(auth, NoAutoRelogin)
@@ -189,7 +197,7 @@ class TestBaseAuthStrategyContract(unittest.TestCase):
         self.assertEqual(hw.platform_label, "华为云空间")
         self.assertEqual(xiaomi.platform_label, "小米云相册")
         self.assertIn("华为账号", hw.credentials_hint)
-        self.assertIn("导入登录态", xiaomi.credentials_hint)
+        self.assertIn("同步设置", xiaomi.credentials_hint)
 
     def test_platform_session_files_declared(self):
         from providers import get_platform_spec

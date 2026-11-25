@@ -163,16 +163,16 @@ class XiaomiSessionStore:
 # ---------------------------------------------------------------------------
 
 class XiaomiAuthStrategy(BaseAuthStrategy):
-    """AuthStrategy 实现：import_session 导入 + heartbeat 探活。
+    """AuthStrategy 实现：扫码登录 / 账号密码登录 / import_session 导入 + heartbeat 探活。
 
-    supports_web_login_2fa = False（密码直登不可靠），
-    supports_curl_import = True（cookie 导入为唯一登录通道）。
+    supports_web_login_2fa = False（密码登录的风控交互走专用 password-login/* 路由），
+    supports_curl_import = True（cookie 导入为保底通道）。
     """
 
     PLATFORM = "xiaomi"
     # -- 平台元数据（BaseAuthStrategy 约定，通用层直接读取） --
     platform_label = "小米云相册"
-    credentials_hint = "请先在「认证与安全」导入登录态（扫码登录或 cookie/cURL 导入）"
+    credentials_hint = "请先在「同步设置」填写小米账号密码，或使用扫码登录 / cookie、cURL 导入"
     login_success_hint = "登录成功"
     qr_login_hint = "请用小米手机「设置 → 小米账号 → 扫一扫」扫码并在手机上确认（5 分钟内有效）"
 
@@ -186,6 +186,7 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
         account = account or {}
         self.account_id = str(account.get("id") or "")
         self._username = (str(account.get("username") or "").strip() or None)
+        self._password = str(account.get("password") or "") or None
         # auth_file 默认：config_dir/xiaomi_{account_id}_auth.json
         # 调用方（account manager）会在 account["auth_file"] 里传实际路径
         auth_file = auth_file or str(account.get("auth_file") or "")
@@ -210,8 +211,6 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
         self._longterm_cooldown_until: float = 0.0
         # 密码登录 pending 会话（T38.5）：单账号单流程，TTL 内有效
         self._pwd_login: PasswordLoginSession | None = None
-        # 发起时暂存的凭据（成功后按「记住密码」决定信封落盘，随后即弃）
-        self._pwd_creds: dict[str, Any] | None = None
         # 密码登录失败冷却截止（防爆破/风控升级）
         self._pwd_cooldown_until: float = 0.0
 
@@ -312,8 +311,8 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
         return client
 
     def has_credentials(self) -> bool:
-        """小米「凭据」= 已导入的 cookie；账号密码不使用。"""
-        return self.store.has_session()
+        """小米「凭据」= 已保存的账号密码（密码登录用）；会话有效性另行判定。"""
+        return bool(self._username and self._password)
 
     def session_info(self, session: Any) -> dict[str, Any]:
         """通用字段 + 风控状态透传（T31.10，UI 限流倒计时用）。"""
@@ -339,16 +338,17 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
             return None
 
     def auth_probe(self) -> dict[str, Any]:
-        """默认探针 + 长效会话状态透传（T36.5，UI「免扫码模式」显示）。"""
+        """默认探针 + 长效会话状态（T36.5）+ 密码登录可用性（UI 按钮态）。"""
         probe = super().auth_probe()
         probe["longterm"] = self.longterm_state()
+        probe["pwd_configured"] = bool(self._username and self._password)
         return probe
 
     def web_login(self, *, prompt_fn: Any = None, output_fn: Any = None,
                   interactive: bool = False) -> Any:
-        """小米不做密码直登（风控必触发验证码）。"""
+        """小米密码登录走专用三段式路由（password-login/*），不走通用直登。"""
         raise AuthExpiredError(
-            "小米云相册不支持密码直登，请从已登录浏览器复制 cookie 导入"
+            "小米请使用「认证与安全」页的账号密码登录或扫码登录（风控需交互验证）"
         )
 
     def submit_challenge(self, code: str, *, prompt_fn: Any = None,
@@ -550,7 +550,6 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
     # -- 账号密码登录（T38，协议 research §8.5） --
 
     PASSWORD_LOGIN_COOLDOWN_SEC = 1800  # 失败冷却：防爆破/风控升级
-    _PASSWORD_AAD = "albumsync:password:"  # 与 AppConfig 同前缀（绑定账号 id）
 
     def _pwd_key(self) -> bytes:
         # 与 AppConfig 共用同一把机器密钥（pkgvar/secret.key）
@@ -558,8 +557,12 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
         return crypto_box.load_or_create_key(pkgvar / "secret.key")
 
     def password_login_start(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """账号密码发起登录：返回 {status: ok|captcha|2fa|error, ...}。"""
-        data = payload if isinstance(payload, dict) else {}
+        """账号密码发起登录：凭据读自「同步设置」保存的账号配置。
+
+        兼容旧版（0.3.30/0.3.31）「记住密码」密文：配置缺密码时一次性
+        解密迁移使用，成功后清除旧密文（提示到「同步设置」重新保存）。
+        """
+        del payload  # 凭据不再来自前端表单，保留参数与 API 签名兼容
         now = time.time()
         if now < self._pwd_cooldown_until:
             wait = int(self._pwd_cooldown_until - now)
@@ -569,23 +572,20 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
                 and self._pwd_login.stage != "done":
             return {"status": "error",
                     "message": "已有进行中的密码登录，请完成当前流程或等待其过期"}
-        user = str(data.get("user") or data.get("username") or "").strip()
-        remember = bool(data.get("rememberPassword"))
-        if bool(data.get("useSaved")):
+        user = self._username or ""
+        password = self._password or ""
+        migrated = False
+        if not (user and password):
             saved_user, enc = self.store.load_login_secret()
-            user = user or saved_user
-            try:
-                # AAD 已随信封存储（seal_text 绑定账号 id），open_text 无需传入
-                password = crypto_box.open_text(self._pwd_key(), enc) if enc else ""
-            except Exception:
-                password = ""
-            if not password:
-                return {"status": "error", "message": "没有已保存的密码，请直接输入"}
-        else:
-            password = str(data.get("password") or "")
+            if saved_user and enc:
+                try:
+                    password = crypto_box.open_text(self._pwd_key(), enc) or ""
+                    user = user or saved_user
+                    migrated = True
+                except Exception:
+                    password = ""
         if not user or not password:
-            return {"status": "error", "message": "账号与密码均必填"}
-        self._pwd_creds = {"user": user, "password": password, "remember": remember}
+            return {"status": "error", "message": self.credentials_hint}
         session = PasswordLoginSession(user, password)
         self._pwd_login = session
         try:
@@ -593,7 +593,15 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
         except PasswordLoginError as exc:
             self._pwd_fail("xiaomi password login failed", exc)
             return {"status": "error", "message": str(exc)}
-        return self._pwd_route_result(session, res)
+        result = self._pwd_route_result(session, res)
+        if migrated and result.get("status") == "ok":
+            try:
+                self.store.save_login_secret("", None)  # 旧密文迁移用完即清
+            except Exception as exc:
+                logger.warning("xiaomi legacy login secret cleanup failed: %s", exc)
+            result["message"] = (result.get("message") or "密码登录成功") \
+                + "（已迁移旧版记住的密码；请在「同步设置」保存账号密码）"
+        return result
 
     def password_login_captcha(self, code: str) -> dict[str, Any]:
         return self._pwd_step(lambda s: s.submit_captcha(code))
@@ -605,15 +613,14 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
         session = self._pwd_login
         active = (session is not None and not session.expired()
                   and session.stage != "done")
-        username, enc = self.store.load_login_secret()
         now = time.time()
         return {
             "active": active,
             "stage": session.stage if active else "",
             "expires_in": int(PENDING_TTL_SEC - (now - session.created_at))
                           if active else 0,
-            "has_saved": bool(enc),
-            "username": username,
+            "has_saved": bool(self._username and self._password),
+            "username": self._username or "",
             "cooldown_remaining_sec": max(0, int(self._pwd_cooldown_until - now)),
         }
 
@@ -621,7 +628,6 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
         session = self._pwd_login
         if session is None or session.expired():
             self._pwd_login = None
-            self._pwd_creds = None
             return {"status": "error",
                     "message": "登录会话不存在或已过期，请重新开始"}
         try:
@@ -639,7 +645,6 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
         return res
 
     def _pwd_finish(self, session: PasswordLoginSession) -> dict[str, Any]:
-        creds = self._pwd_creds or {}
         payload = {
             "passToken": session.result.get("passToken", ""),
             "userId": session.result.get("userId", ""),
@@ -651,20 +656,7 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
         except Exception as exc:
             self._pwd_fail("xiaomi password login import failed", exc)
             return {"status": "error", "message": f"票据导入失败: {exc}"}
-        # 密码预填凭据：记住 → 信封加密落盘；未记住 → 清除旧值（密码即用即弃）
-        username = str(creds.get("user") or "")
-        if creds.get("remember") and creds.get("password"):
-            try:
-                enc = crypto_box.seal_text(
-                    self._pwd_key(), str(creds["password"]),
-                    aad=f"{self._PASSWORD_AAD}{self.account_id}")
-                self.store.save_login_secret(username, enc)
-            except Exception as exc:
-                logger.warning("xiaomi login password persist failed: %s", exc)
-        else:
-            self.store.save_login_secret(username, None)
         self._pwd_login = None
-        self._pwd_creds = None
         logger.info("xiaomi password login ok, account=%s userId=%s",
                     self.account_id, payload["userId"])
         return {"status": "ok", "message": "密码登录成功，长效会话已导入",
@@ -672,7 +664,6 @@ class XiaomiAuthStrategy(BaseAuthStrategy):
 
     def _pwd_fail(self, log_msg: str, exc: Exception) -> None:
         self._pwd_login = None
-        self._pwd_creds = None
         self._pwd_cooldown_until = time.time() + self.PASSWORD_LOGIN_COOLDOWN_SEC
         logger.warning("%s: %s", log_msg, exc)
 

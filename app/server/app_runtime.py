@@ -991,7 +991,7 @@ class AccountRuntime:
             # 风控状态（T31.10）：会话在时由 session_info 带出；不在时走
             # strategy.risk_state()（限流可能在会话失效期间被记录）
             risk = info.get("risk") or self.strategy.risk_state()
-            return {
+            result = {
                 "has_session": session is not None,
                 "user_id": info["user_id"],
                 "login_sec_level": info["login_sec_level"],
@@ -1008,6 +1008,13 @@ class AccountRuntime:
                     if pending else None
                 ),
             }
+            # 平台扩展探针字段（小米 longterm/pwd_configured 等）原样透传，
+            # 通用层不感知具体键；保留键已显式映射，跳过防覆盖归一化结果
+            reserved = {"pending_2fa", "has_cas_tgt", "credentials_configured"}
+            for key, value in probe.items():
+                if key not in reserved and key not in result:
+                    result[key] = value
+            return result
 
     # ---------- 同步操作 ----------
 

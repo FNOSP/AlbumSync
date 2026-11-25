@@ -216,14 +216,16 @@ class PasswordLogin2FATest(unittest.TestCase):
 
 
 class StrategyPasswordLoginTest(unittest.TestCase):
-    """T38.5：策略层接入——成功落盘/记住密码信封/冷却/使用已保存密码。"""
+    """T38.5：策略层接入——凭据读自账号配置 + 旧版「记住密码」密文迁移 + 失败冷却。"""
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="xiaomi-pwd-"))
         # auth_file 放在 tmp/acc/ 下 → parent.parent=tmp，secret.key 落在 tmp 内
         auth_file = self.tmp / "acc" / "xiaomi_acc-pw-1_auth.json"
         self.strategy = XiaomiAuthStrategy(
-            None, {"id": "acc-pw-1"}, auth_file=str(auth_file))
+            None, {"id": "acc-pw-1", "username": "13800000000",
+                   "password": PASSWORD},
+            auth_file=str(auth_file))
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -242,69 +244,71 @@ class StrategyPasswordLoginTest(unittest.TestCase):
             return [
                 (302, b"", {"Set-Cookie": f"serviceToken={token}; Path=/",
                             "Location": "https://i.mi.com/"}, ""),
-                (200, b"ok", {"Set-Cookie": "serviceToken=STNEW==; Path=/; Domain=.i.mi.com, "
+                (200, b"ok", {"Set-Cookie": f"serviceToken={token}; Path=/; Domain=.i.mi.com, "
                                            "userId=123; Path=/; Domain=.i.mi.com"}, "https://i.mi.com/"),
             ]
         return [anon("Ib3%3D"), sl(), *hops("ST1"), anon("Ib3%3D"), sl(), *hops("ST2")]
 
-    def test_success_remember_saves_encrypted_password(self):
+    def _renew_patch(self):
+        seq = iter(self._renew_responses())
+        return patch("providers.xiaomi.longterm._http",
+                     side_effect=lambda *a, **k: next(seq))
+
+    def test_success_uses_config_credentials(self):
         p_login, calls = _patch_http([
             (200, _sign_body(), {}),
             (200, _ok_auth2(pass_token="PTX", user_id="123", c_user_id="CU1"), {}),
         ])
-        p_renew = patch("providers.xiaomi.longterm._http", side_effect=None)
-        seq = iter(self._renew_responses())
-        fake_renew = lambda *a, **k: next(seq)  # noqa: E731
-        p_renew = patch("providers.xiaomi.longterm._http", side_effect=fake_renew)
-        with p_login, p_renew:
-            res = self.strategy.password_login_start(
-                {"user": "13800000000", "password": PASSWORD, "rememberPassword": True})
+        with p_login, self._renew_patch():
+            res = self.strategy.password_login_start({})
         self.assertEqual(res["status"], "ok")
         # 票据已导入（双次换发后落盘）
         self.assertTrue(self.strategy.store.has_session())
         self.assertTrue((self.strategy.longterm_state() or {}).get("enabled"))
-        # 密码信封加密落盘 + 可解密回原值
-        username, enc = self.strategy.store.load_login_secret()
-        self.assertEqual(username, "13800000000")
-        self.assertTrue(enc)
-        plain = crypto_box.open_text(self.strategy._pwd_key(), enc)
-        self.assertEqual(plain, PASSWORD)
-        self.assertIsNone(self.strategy._pwd_creds)
+        # Auth2 使用配置中的账号密码
+        auth2 = [c for c in calls if "serviceLoginAuth2" in c["url"]]
+        self.assertEqual(len(auth2), 1)
+        self.assertEqual(auth2[0]["data"]["user"], "13800000000")
+        self.assertEqual(auth2[0]["data"]["hash"],
+                         hashlib.md5(PASSWORD.encode()).hexdigest().upper())
+        # 不再写「记住密码」密文（密码持久化只走账号配置保存路径）
+        self.assertEqual(self.strategy.store.load_login_secret(), ("", None))
         self.assertIsNone(self.strategy._pwd_login)
 
-    def test_no_remember_clears_password(self):
-        p_login, _ = _patch_http([
-            (200, _sign_body(), {}),
-            (200, _ok_auth2(), {}),
-        ])
-        seq = iter(self._renew_responses())
-        with p_login, patch("providers.xiaomi.longterm._http",
-                            side_effect=lambda *a, **k: next(seq)):
-            res = self.strategy.password_login_start(
-                {"user": "u", "password": PASSWORD, "rememberPassword": False})
-        self.assertEqual(res["status"], "ok")
-        username, enc = self.strategy.store.load_login_secret()
-        self.assertIsNone(enc)  # 未记住 → 清除旧密码
-        self.assertEqual(username, "u")
+    def test_missing_credentials_returns_hint(self):
+        bare = XiaomiAuthStrategy(
+            None, {"id": "acc-pw-1"},
+            auth_file=str(self.tmp / "acc" / "xiaomi_acc-pw-1_auth.json"))
+        p_login, calls = _patch_http([(200, _sign_body(), {})])
+        with p_login:
+            res = bare.password_login_start({})
+        self.assertEqual(res["status"], "error")
+        self.assertIn("同步设置", res["message"])
+        # 未发起任何网络请求
+        self.assertEqual(len(calls), 0)
 
-    def test_use_saved_password(self):
+    def test_legacy_saved_password_migrated_once(self):
+        bare = XiaomiAuthStrategy(
+            None, {"id": "acc-pw-1"},
+            auth_file=str(self.tmp / "acc" / "xiaomi_acc-pw-1_auth.json"))
+        enc = crypto_box.seal_text(bare._pwd_key(), PASSWORD,
+                                   aad="albumsync:password:acc-pw-1")
+        bare.store.save_login_secret("saveduser", enc)
         p_login, calls = _patch_http([
             (200, _sign_body(), {}),
             (200, _ok_auth2(pass_token="PTY", user_id="123", c_user_id=""), {}),
         ])
-        seq = iter(self._renew_responses())
-        with p_login, patch("providers.xiaomi.longterm._http",
-                            side_effect=lambda *a, **k: next(seq)):
-            # 先手工保存一份加密密码（模拟上次「记住密码」）
-            enc = crypto_box.seal_text(self.strategy._pwd_key(), PASSWORD,
-                                       aad="albumsync:password:acc-pw-1")
-            self.strategy.store.save_login_secret("saveduser", enc)
-            res = self.strategy.password_login_start({"useSaved": True})
+        with p_login, self._renew_patch():
+            res = bare.password_login_start({})
         self.assertEqual(res["status"], "ok")
+        # 旧密文中的账号密码被迁移使用
         auth2 = [c for c in calls if "serviceLoginAuth2" in c["url"]]
         self.assertEqual(auth2[0]["data"]["user"], "saveduser")
         self.assertEqual(auth2[0]["data"]["hash"],
                          hashlib.md5(PASSWORD.encode()).hexdigest().upper())
+        # 迁移成功提示去「同步设置」保存，且旧密文清除
+        self.assertIn("同步设置", res["message"])
+        self.assertEqual(bare.store.load_login_secret(), ("", None))
 
     def test_failure_cooldown(self):
         p_login, _ = _patch_http([
@@ -312,17 +316,18 @@ class StrategyPasswordLoginTest(unittest.TestCase):
             (200, _jp({"code": 70016, "desc": "登录验证失败", "captchaUrl": ""}), {}),
         ])
         with p_login:
-            res = self.strategy.password_login_start({"user": "u", "password": "bad"})
+            res = self.strategy.password_login_start({})
         self.assertEqual(res["status"], "error")
         # 冷却期内再次发起被拒（不消耗任何网络调用）
         with patch("providers.xiaomi.password_login._req",
                    side_effect=AssertionError("cooldown must block requests")) as guard:
-            res2 = self.strategy.password_login_start({"user": "u", "password": "x"})
+            res2 = self.strategy.password_login_start({})
         self.assertEqual(res2["status"], "error")
         self.assertIn("冷却", res2["message"])
         self.assertEqual(guard.call_count, 0)
         status = self.strategy.password_login_status()
         self.assertGreater(status["cooldown_remaining_sec"], 0)
+        self.assertTrue(status["has_saved"])
 
 
 if __name__ == "__main__":
