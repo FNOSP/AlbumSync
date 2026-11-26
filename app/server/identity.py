@@ -7,8 +7,8 @@
 
 信任模型：
 - 经网关（携带身份头）：身份头即权威身份，owner 过滤按 user_id 生效
-- 直连 TCP 端口 / 裸 socket（无身份头）：本机 admin 信任（与 fnOS 应用
-  生态一致，应用端口不对公网暴露）
+- socket 直连 / 裸 socket（无身份头，0.3.36 起服务无 TCP 端口）：本机 admin 信任
+  （与 fnOS 应用生态一致，socket 仅 NAS 本机可达）
 - daemon / 调度器等后台路径：SYSTEM_REQUESTOR（等价 admin，全可见）
 
 防伪造：身份头由网关 CGI 注入；CGI 是否剥离外部同名头经 /api/debug/headers

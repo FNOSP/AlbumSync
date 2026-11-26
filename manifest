@@ -1,5 +1,5 @@
 appname                    = AlbumSync
-version                    = 0.3.35
+version                    = 0.3.36
 display_name               = 相册同步
 desc                       = """多云相册备份到飞牛 NAS。支持多账号：同一平台可添加多个账号，各自独立管理相册选择、存储目录、调度与登录态，账号间完全隔离、互不干扰，配置保存按账号热生效。华为云空间支持两种登录：浏览器会话 cURL 导入（免密码）与账号密码登录（短信/邮箱二次验证码在网页提交，信任设备后静默重登）。小米云相册（i.mi.com）支持浏览器 cookie 导入（免密码，不支持自动重登）。iCloud 云相册支持 Apple ID/密码登录、双重认证/两步验证及国际区/中国区。同步能力：按相册/文件类型/时间范围过滤、增量下载、目录结构模板、删除镜像策略、并发与限速、cron 定时同步、dry-run 预览、Webhook 通知。账号密码使用机器密钥加密落盘（config 仅存密文），并支持口令加密的凭据备份导出/导入（.asbak，可在全局设置中配置备份目录）。内置 Web 管理界面（账号管理/状态总览/全局设置/单账号工作区）。华为/小米同步引擎基于上游开源项目 hwcloudpd；iCloud 协议复用随包 vendor 的 icloud_photos_downloader 及其纯 Python 依赖，无需 venv/pip 或 NAS 额外安装。开源地址：https://github.com/tuber0613/hwcloudpd"""
 platform                   = x86
@@ -12,11 +12,17 @@ os_min_version             = 1.1.8
 ctl_stop                   = true
 desktop_uidir              = ui
 desktop_applaunchname      = AlbumSync.Application
-service_port               = 9801
-checkport                  = true
+checkport                  = false
 install_dep_apps           = python311
 disable_authorization_path = false
 changelog                  = """
+- 0.3.36 去端口化（测试环境安全策略）：服务不再监听任何 TCP 端口——manifest 移除
+  service_port 并置 checkport=false（存活判定回落到进程状态），server.py 部署模式
+  仅监听 Unix socket（app.sock，fnOS 网关 nginx 经 gatewaySocket 代理全部流量，
+  桌面入口 /app/AlbumSync 照常注入身份头），cmd/main 启动命令与启动后检查同步调整
+  （进程存活 + socket 文件存在性，不再检查端口监听）；本地开发模式保持纯 TCP 直跑
+  （PORT 环境变量，默认 9801）；身份信任模型语义不变（socket 直连无身份头仍视为
+  本机管理信任域），README 访问方式与部署验证说明同步更新
 - 0.3.35 每账号同步进度统计（T46）：账号卡片与详情页实时进度条（百分比 + 预计剩余时间 +
   速度 + 当前文件名）——引擎三阶段上报（patches/0011：scanning 扫描不定态 / downloading
   总量已知按完成计数推进 / done 收尾），daemon 内存瞬态快照（线程安全，不落盘，重启清零，

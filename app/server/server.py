@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """AlbumSync 业务后端服务（fnOS 原生应用服务壳，多账号版）。
 
-架构模式（参照 FreePower/LastDiscard 已验证模型）：
-- 同时监听 TCP 端口和 Unix domain socket，兼容 fnOS 统一网关
-- TCP 端口：供 checkport 健康检查与直连访问
-- Unix socket：供 fnOS 网关（nginx）通过 gatewaySocket=app.sock 代理流量
+架构模式（参照 FreePower/LastDiscard 已验证模型，0.3.36 起去端口化）：
+- 部署模式仅监听 Unix domain socket，不占用任何 TCP 端口
+- Unix socket：fnOS 网关（nginx）通过 gatewaySocket=app.sock 代理全部流量，
+  桌面入口 /app/<AppId> 经网关注入身份头（X-Trim-*）
+- 本地开发模式（无命令行参数）仅监听 TCP，便于浏览器直连调试
 - 进程内组装 SchedulerManager（多账号运行时管理器），每账号后台线程运行 SyncDaemon
 
 API 形态：
@@ -12,8 +13,8 @@ API 形态：
   账号：/api/accounts/{id}[/{status|albums|auth/*|logs|sync/*}]（PUT 更新、DELETE 删除）
 
 启动方式：
-  # fnOS 部署模式（TCP + Unix socket，参数顺序与 cmd/main 一致）
-  python server.py <ui_dir> <tcp_port> <socket_path> [gateway_prefix]
+  # fnOS 部署模式（仅 Unix socket，参数顺序与 cmd/main 一致）
+  python server.py <ui_dir> <socket_path> [gateway_prefix]
 
   # 本地开发模式（仅 TCP）
   TRIM_PKGVAR=./dev-data python server.py   # 或 PORT=9801
@@ -525,18 +526,18 @@ else:
 # ========== 启动入口 ==========
 
 def main() -> None:
-    if len(sys.argv) >= 4:
-        # fnOS 部署模式：<ui_dir> <tcp_port> <socket_path> [gateway_prefix]
+    tcp_port: int | None = None
+    if len(sys.argv) >= 3:
+        # fnOS 部署模式（去端口化，仅 Unix socket）：<ui_dir> <socket_path> [gateway_prefix]
         static_dir = sys.argv[1]
-        tcp_port = int(sys.argv[2])
-        socket_path = sys.argv[3]
-        gateway_prefix = sys.argv[4] if len(sys.argv) > 4 else "/app/AlbumSync"
+        socket_path = sys.argv[2]
+        gateway_prefix = sys.argv[3] if len(sys.argv) > 3 else "/app/AlbumSync"
         pkgvar = os.environ.get("TRIM_PKGVAR", "")
         if not pkgvar:
             print("[serve] ERROR: TRIM_PKGVAR not set (deploy mode requires it)", flush=True)
             sys.exit(1)
     else:
-        # 本地开发模式：仅 TCP
+        # 本地开发模式：仅 TCP（无 socket）
         tcp_port = int(os.environ.get("PORT", "9801"))
         socket_path = None
         static_dir = str(Path(SERVER_DIR).parent / "ui")
@@ -561,11 +562,13 @@ def main() -> None:
         except (ValueError, OSError):
             pass
 
-    # TCP 服务器（健康检查 + 直连访问）
-    tcp_server = ThreadingHTTPServer(("0.0.0.0", tcp_port), RequestHandler)
-    tcp_server.daemon_threads = True
-    threading.Thread(target=tcp_server.serve_forever, daemon=True).start()
-    print(f"[serve] TCP listening on 0.0.0.0:{tcp_port}", flush=True)
+    # TCP 服务器（仅本地开发模式；部署模式不占用任何端口）
+    tcp_server = None
+    if tcp_port is not None:
+        tcp_server = ThreadingHTTPServer(("0.0.0.0", tcp_port), RequestHandler)
+        tcp_server.daemon_threads = True
+        threading.Thread(target=tcp_server.serve_forever, daemon=True).start()
+        print(f"[serve] TCP listening on 0.0.0.0:{tcp_port}", flush=True)
     print(f"[serve] static_dir={static_dir}", flush=True)
     print(f"[serve] gateway_prefix={gateway_prefix}", flush=True)
     print(f"[serve] pkgvar={pkgvar}", flush=True)
@@ -579,6 +582,11 @@ def main() -> None:
         threading.Thread(target=unix_server.serve_forever, daemon=True).start()
         print(f"[serve] Unix socket listening on {socket_path}", flush=True)
 
+    if tcp_server is None and unix_server is None:
+        print("[serve] ERROR: no listener available (deploy mode requires Unix socket support)", flush=True)
+        manager.stop()
+        sys.exit(1)
+
     print(f"[{APP_NAME}] service ready", flush=True)
     try:
         while not stop_event.wait(1.0):
@@ -586,7 +594,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n[serve] stopping...", flush=True)
     finally:
-        tcp_server.shutdown()
+        if tcp_server is not None:
+            tcp_server.shutdown()
         if unix_server is not None:
             unix_server.shutdown()
             try:

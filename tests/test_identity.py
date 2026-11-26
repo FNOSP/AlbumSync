@@ -33,7 +33,7 @@ def _headers(**kv: str) -> Message:
 class TestParseRequestor(unittest.TestCase):
     def test_no_headers_is_local_admin(self):
         # 无身份头 = 直连 = 本机 admin 信任
-        r = parse_requestor(_headers(Host="nas:9801"))
+        r = parse_requestor(_headers(Host="nas"))
         self.assertEqual(r.user_id, "")
         self.assertTrue(r.is_admin)
         self.assertFalse(r.via_gateway)

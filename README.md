@@ -98,10 +98,9 @@ sudo appcenter-cli start AlbumSync
 
 | 路径 | 地址 | 身份 |
 |---|---|---|
-| fnOS 网关 | `http://<NAS>:5666/app/AlbumSync/` | 当前登录的 fnOS 用户（推荐） |
-| 直连端口 | `http://<NAS>:9801/` | 视为本机管理（全部权限） |
+| fnOS 网关 | `http://<NAS>:5666/app/AlbumSync/` | 当前登录的 fnOS 用户 |
 
-经网关访问时，普通用户只能看到自己的账号；直连端口视为本机管理信任域（与 fnOS 官方「端口直连不受桌面权限限制」的生态行为一致）。
+应用不监听任何 TCP 端口，全部流量经 fnOS 网关（nginx → Unix socket）代理并注入登录身份；经网关访问时，普通用户只能看到自己的账号。
 
 ## 目录与数据
 
@@ -121,10 +120,10 @@ AlbumSync/
 ├── cmd/                    # 生命周期脚本（main/install/uninstall/upgrade…）
 ├── config/
 │   ├── privilege           # 权限声明
-│   └── resource            # 端口 9801 + Unix socket app.sock + 共享目录声明
+│   └── resource            # Unix socket app.sock + 共享目录声明（无端口）
 ├── app/
 │   ├── server/             # Web 服务壳 + 调度 + 身份层 + Provider 抽象
-│   │   ├── server.py       #   双监听 HTTP 服务（TCP + 网关 Unix socket）
+│   │   ├── server.py       #   HTTP 服务（部署：仅网关 Unix socket；本地开发：仅 TCP）
 │   │   ├── app_runtime.py  #   运行时：账号/配置/调度/引擎托管
 │   │   ├── identity.py     #   网关身份头解析（X-Trim-Userid/Username/Isadmin）
 │   │   ├── scheduler.py    #   可见性核心与账号级调度
@@ -137,7 +136,7 @@ AlbumSync/
 └── tools/                  # fnpack 打包工具 + 引擎 vendor 脚本 + fpk 构建脚本
 ```
 
-- 服务同时监听 TCP 端口（健康检查/直连）与 Unix socket（fnOS 网关经 nginx 代理）
+- 服务不监听 TCP 端口，仅监听 Unix socket（fnOS 网关经 nginx 代理；本地开发模式除外）
 - 引擎以「vendored 副本 + patches」方式管理：上游仓库保持只读，`tools/sync_engine.py` 复制源码并按序应用补丁，保证可复现构建
 
 ## 开发与构建
@@ -170,7 +169,8 @@ wsl sh -c "sshpass -p <密码> scp /mnt/e/.../AlbumSync.fpk <用户>@<NAS_IP>:/t
 
 部署后验证：
 ```bash
-curl -s http://127.0.0.1:9801/api/status      # 直连健康检查
+# NAS 本机经网关健康检查（应用无端口，socket 仅本机可达）
+curl -s http://127.0.0.1:5666/app/AlbumSync/api/status
 curl -s http://<NAS>:5666/app/AlbumSync/      # 网关访问
 ```
 
@@ -181,7 +181,7 @@ curl -s http://<NAS>:5666/app/AlbumSync/      # 网关访问
 - **升级后版本没变？** `install-fpk` 对已装应用静默跳过，必须先 uninstall（保留数据）再 install。
 - **`appcenter-cli start` 报 error 10500？** install 后应用已自动启动导致 start 冲突，用 `appcenter-cli list` + `curl` 确认实际状态即可。
 - **普通用户打开应用提示 Forbidden？** 入口可见性由 `app/ui/config` 的 `allUsers` 控制，修改后需重新安装才能生效。
-- **直连端口安全吗？** 直连即管理权限，请勿将 9801 端口暴露到公网；日常使用建议走网关路径以获得按用户隔离。
+- **为什么没有端口直连？** 0.3.36 起应用去端口化（测试环境安全策略），仅经 fnOS 网关代理，登录身份由网关注入并按用户隔离；NAS 本机可用 `curl --unix-socket /var/apps/AlbumSync/app.sock http://localhost/api/status` 直连诊断。
 
 ## 版本历史
 

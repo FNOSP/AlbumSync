@@ -48,13 +48,8 @@ start_process() {
   log_msg "App directory: ${TRIM_APPDEST}"
   log_msg "Data directory: ${TRIM_PKGVAR}"
   log_msg "Config directory: ${TRIM_PKGETC:-N/A}"
-  log_msg "TRIM_SERVICE_PORT=${TRIM_SERVICE_PORT:-not set}"
   log_msg "Python binary: ${PYTHON_BIN}"
   log_msg "APP_SRC_DIR: ${APP_SRC_DIR}"
-
-  # 端口号仅从 manifest 的 service_port（通过 TRIM_SERVICE_PORT 环境变量）获取
-  LISTEN_PORT="${TRIM_SERVICE_PORT:-9801}"
-  log_msg "LISTEN_PORT (from manifest TRIM_SERVICE_PORT): ${LISTEN_PORT}"
 
   local ui_dir="${TRIM_APPDEST}/ui"
   if [ ! -d "${ui_dir}" ]; then
@@ -94,7 +89,8 @@ start_process() {
   rm -f "${socket_path}"
 
   local gateway_prefix="/app/${TRIM_APPNAME:-AlbumSync}"
-  CMD="\"${PYTHON_BIN}\" \"${serve_script}\" \"${ui_dir}\" ${LISTEN_PORT} \"${socket_path}\" \"${gateway_prefix}\""
+  # 去端口化：服务仅监听 Unix socket，全部流量经 fnOS 网关（nginx gatewaySocket）代理
+  CMD="\"${PYTHON_BIN}\" \"${serve_script}\" \"${ui_dir}\" \"${socket_path}\" \"${gateway_prefix}\""
 
   log_msg "CMD = ${CMD}"
   log_msg "Socket path = ${socket_path}"
@@ -111,7 +107,6 @@ start_process() {
       TRIM_APPDEST="${TRIM_APPDEST}" \
       TRIM_APPNAME="${TRIM_APPNAME}" \
       TRIM_APPVER="${TRIM_APPVER:-}" \
-      TRIM_SERVICE_PORT="${TRIM_SERVICE_PORT:-}" \
       TRIM_ROOT="${TRIM_ROOT:-}" \
       bash -c "${CMD}" >>"${LOG_FILE}" 2>&1 &
   else
@@ -128,18 +123,9 @@ start_process() {
     log_msg "SUCCESS: Process ${bg_pid} is still running after 2s"
   else
     log_msg "ERROR: Process ${bg_pid} exited immediately after startup"
-    log_msg "Check command output above for errors (e.g. python missing, port in use)"
+    log_msg "Check command output above for errors (e.g. python missing, ui/server files missing)"
     rm -f "${PID_FILE}"
     return 1
-  fi
-
-  # 检查端口是否监听
-  if command -v ss >/dev/null 2>&1; then
-    if ss -tln 2>/dev/null | grep -q ":${LISTEN_PORT} "; then
-      log_msg "SUCCESS: Port ${LISTEN_PORT} is listening"
-    else
-      log_msg "WARNING: Port ${LISTEN_PORT} is not listening yet (process running but port not bound)"
-    fi
   fi
 
   # 检查 Unix socket 是否创建
